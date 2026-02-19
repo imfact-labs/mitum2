@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ProtoconNet/mitum2/util"
-	"github.com/ProtoconNet/mitum2/util/logging"
+	"github.com/imfact-labs/mitum2/util"
+	"github.com/imfact-labs/mitum2/util/logging"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"golang.org/x/exp/slices"

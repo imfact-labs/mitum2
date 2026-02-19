@@ -3,7 +3,7 @@ package base
 import (
 	"time"
 
-	"github.com/ProtoconNet/mitum2/util"
+	"github.com/imfact-labs/mitum2/util"
 )
 
 type Voteproof interface {

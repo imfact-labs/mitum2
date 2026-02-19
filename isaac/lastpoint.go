@@ -1,7 +1,7 @@
 package isaac
 
 import (
-	"github.com/ProtoconNet/mitum2/base"
+	"github.com/imfact-labs/mitum2/base"
 	"github.com/pkg/errors"
 )
 

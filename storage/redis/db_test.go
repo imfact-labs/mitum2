@@ -9,8 +9,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/ProtoconNet/mitum2/storage"
-	"github.com/ProtoconNet/mitum2/util"
+	"github.com/imfact-labs/mitum2/storage"
+	"github.com/imfact-labs/mitum2/util"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/suite"
 )

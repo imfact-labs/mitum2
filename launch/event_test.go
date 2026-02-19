@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	leveldbstorage "github.com/ProtoconNet/mitum2/storage/leveldb"
-	"github.com/ProtoconNet/mitum2/util"
+	leveldbstorage "github.com/imfact-labs/mitum2/storage/leveldb"
+	"github.com/imfact-labs/mitum2/util"
 	"github.com/stretchr/testify/suite"
 )
 

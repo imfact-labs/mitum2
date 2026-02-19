@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ProtoconNet/mitum2/base"
-	"github.com/ProtoconNet/mitum2/isaac"
-	"github.com/ProtoconNet/mitum2/util/logging"
+	"github.com/imfact-labs/mitum2/base"
+	"github.com/imfact-labs/mitum2/isaac"
+	"github.com/imfact-labs/mitum2/util/logging"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/goleak"
 )

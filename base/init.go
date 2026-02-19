@@ -1,6 +1,6 @@
 package base
 
-import "github.com/ProtoconNet/mitum2/util"
+import "github.com/imfact-labs/mitum2/util"
 
 var objcache util.GCache[string, any]
 

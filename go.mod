@@ -1,4 +1,4 @@
-module github.com/ProtoconNet/mitum2
+module github.com/imfact-labs/mitum2
 
 go 1.24.0
 

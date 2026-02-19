@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ProtoconNet/mitum2/base"
-	"github.com/ProtoconNet/mitum2/isaac"
-	isaacdatabase "github.com/ProtoconNet/mitum2/isaac/database"
-	"github.com/ProtoconNet/mitum2/network/quicstream"
-	quicstreamheader "github.com/ProtoconNet/mitum2/network/quicstream/header"
-	"github.com/ProtoconNet/mitum2/util/encoder"
+	"github.com/imfact-labs/mitum2/base"
+	"github.com/imfact-labs/mitum2/isaac"
+	isaacdatabase "github.com/imfact-labs/mitum2/isaac/database"
+	"github.com/imfact-labs/mitum2/network/quicstream"
+	quicstreamheader "github.com/imfact-labs/mitum2/network/quicstream/header"
+	"github.com/imfact-labs/mitum2/util/encoder"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/goleak"
@@ -424,7 +424,7 @@ func (t *testSyncSourceChecker) TestCalled() {
 func TestSyncSourceChecker(t *testing.T) {
 	defer goleak.VerifyNone(t,
 		goleak.IgnoreTopFunction("github.com/syndtr/goleveldb/leveldb.(*DB).mpoolDrain"),
-		goleak.IgnoreTopFunction("github.com/ProtoconNet/mitum2/util.EnsureRead.func1"),
+		goleak.IgnoreTopFunction("github.com/imfact-labs/mitum2/util.EnsureRead.func1"),
 	)
 
 	suite.Run(t, new(testSyncSourceChecker))

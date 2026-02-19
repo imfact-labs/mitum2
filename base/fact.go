@@ -3,7 +3,7 @@ package base
 import (
 	"math"
 
-	"github.com/ProtoconNet/mitum2/util"
+	"github.com/imfact-labs/mitum2/util"
 )
 
 const MaxTokenSize = math.MaxUint16

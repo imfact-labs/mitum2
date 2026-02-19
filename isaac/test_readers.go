@@ -6,8 +6,8 @@ package isaac
 import (
 	"time"
 
-	"github.com/ProtoconNet/mitum2/base"
-	"github.com/ProtoconNet/mitum2/util"
+	"github.com/imfact-labs/mitum2/base"
+	"github.com/imfact-labs/mitum2/util"
 )
 
 func (rs *BlockItemReaders) EmptyHeightsLock() util.LockedMap[base.Height, time.Time] {

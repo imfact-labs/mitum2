@@ -4,10 +4,10 @@
 package isaacstates
 
 import (
-	"github.com/ProtoconNet/mitum2/base"
-	isaacblock "github.com/ProtoconNet/mitum2/isaac/block"
-	"github.com/ProtoconNet/mitum2/util"
-	"github.com/ProtoconNet/mitum2/util/valuehash"
+	"github.com/imfact-labs/mitum2/base"
+	isaacblock "github.com/imfact-labs/mitum2/isaac/block"
+	"github.com/imfact-labs/mitum2/util"
+	"github.com/imfact-labs/mitum2/util/valuehash"
 )
 
 func newTestBlockMap(

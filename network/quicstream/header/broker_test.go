@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ProtoconNet/mitum2/network/quicstream"
-	"github.com/ProtoconNet/mitum2/util"
-	"github.com/ProtoconNet/mitum2/util/encoder"
-	jsonenc "github.com/ProtoconNet/mitum2/util/encoder/json"
-	"github.com/ProtoconNet/mitum2/util/hint"
+	"github.com/imfact-labs/mitum2/network/quicstream"
+	"github.com/imfact-labs/mitum2/util"
+	"github.com/imfact-labs/mitum2/util/encoder"
+	jsonenc "github.com/imfact-labs/mitum2/util/encoder/json"
+	"github.com/imfact-labs/mitum2/util/hint"
 	"github.com/pkg/errors"
 	"github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/suite"
@@ -576,7 +576,7 @@ func (t *testBrokers) TestReadBody() {
 
 func TestBrokers(t *testing.T) {
 	defer goleak.VerifyNone(t,
-		goleak.IgnoreTopFunction("github.com/ProtoconNet/mitum2/util.EnsureRead.func1"),
+		goleak.IgnoreTopFunction("github.com/imfact-labs/mitum2/util.EnsureRead.func1"),
 	)
 
 	suite.Run(t, new(testBrokers))

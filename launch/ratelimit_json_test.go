@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ProtoconNet/mitum2/base"
-	"github.com/ProtoconNet/mitum2/network/quicstream"
-	"github.com/ProtoconNet/mitum2/util/encoder"
-	jsonenc "github.com/ProtoconNet/mitum2/util/encoder/json"
+	"github.com/imfact-labs/mitum2/base"
+	"github.com/imfact-labs/mitum2/network/quicstream"
+	"github.com/imfact-labs/mitum2/util/encoder"
+	jsonenc "github.com/imfact-labs/mitum2/util/encoder/json"
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/time/rate"
 )

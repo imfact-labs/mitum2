@@ -5,8 +5,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/ProtoconNet/mitum2/storage"
-	"github.com/ProtoconNet/mitum2/util"
+	"github.com/imfact-labs/mitum2/storage"
+	"github.com/imfact-labs/mitum2/util"
 	"github.com/stretchr/testify/suite"
 	leveldbutil "github.com/syndtr/goleveldb/leveldb/util"
 )

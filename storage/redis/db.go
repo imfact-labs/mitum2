@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ProtoconNet/mitum2/storage"
-	"github.com/ProtoconNet/mitum2/util"
+	"github.com/imfact-labs/mitum2/storage"
+	"github.com/imfact-labs/mitum2/util"
 	"github.com/pkg/errors"
 	"github.com/redis/go-redis/v9"
 )

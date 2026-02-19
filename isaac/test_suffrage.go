@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/ProtoconNet/mitum2/base"
+	"github.com/imfact-labs/mitum2/base"
 )
 
 func (suf Suffrage) Locals() []base.LocalNode {

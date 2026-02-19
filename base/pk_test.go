@@ -3,8 +3,8 @@ package base
 import (
 	"testing"
 
-	"github.com/ProtoconNet/mitum2/util/encoder"
-	jsonenc "github.com/ProtoconNet/mitum2/util/encoder/json"
+	"github.com/imfact-labs/mitum2/util/encoder"
+	jsonenc "github.com/imfact-labs/mitum2/util/encoder/json"
 	"github.com/stretchr/testify/suite"
 )
 

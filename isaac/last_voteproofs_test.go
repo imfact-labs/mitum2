@@ -3,8 +3,8 @@ package isaac
 import (
 	"testing"
 
-	"github.com/ProtoconNet/mitum2/base"
-	"github.com/ProtoconNet/mitum2/util/valuehash"
+	"github.com/imfact-labs/mitum2/base"
+	"github.com/imfact-labs/mitum2/util/valuehash"
 	"github.com/stretchr/testify/suite"
 )
 

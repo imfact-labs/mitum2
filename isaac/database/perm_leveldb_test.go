@@ -3,10 +3,10 @@ package isaacdatabase
 import (
 	"testing"
 
-	"github.com/ProtoconNet/mitum2/base"
-	"github.com/ProtoconNet/mitum2/isaac"
-	leveldbstorage "github.com/ProtoconNet/mitum2/storage/leveldb"
-	"github.com/ProtoconNet/mitum2/util"
+	"github.com/imfact-labs/mitum2/base"
+	"github.com/imfact-labs/mitum2/isaac"
+	leveldbstorage "github.com/imfact-labs/mitum2/storage/leveldb"
+	"github.com/imfact-labs/mitum2/util"
 	"github.com/stretchr/testify/suite"
 )
 

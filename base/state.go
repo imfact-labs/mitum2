@@ -1,8 +1,8 @@
 package base
 
 import (
-	"github.com/ProtoconNet/mitum2/util"
-	"github.com/ProtoconNet/mitum2/util/hint"
+	"github.com/imfact-labs/mitum2/util"
+	"github.com/imfact-labs/mitum2/util/hint"
 )
 
 var StateFixedtreeHint = hint.MustNewHint("state-fixedtree-v0.0.1")

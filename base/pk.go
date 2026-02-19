@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"github.com/btcsuite/btcutil/base58"
 
-	"github.com/ProtoconNet/mitum2/util"
-	"github.com/ProtoconNet/mitum2/util/encoder"
+	"github.com/imfact-labs/mitum2/util"
+	"github.com/imfact-labs/mitum2/util/encoder"
 	"github.com/pkg/errors"
 )
 

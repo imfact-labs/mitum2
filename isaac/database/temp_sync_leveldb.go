@@ -1,10 +1,10 @@
 package isaacdatabase
 
 import (
-	"github.com/ProtoconNet/mitum2/base"
-	leveldbstorage "github.com/ProtoconNet/mitum2/storage/leveldb"
-	"github.com/ProtoconNet/mitum2/util"
-	"github.com/ProtoconNet/mitum2/util/encoder"
+	"github.com/imfact-labs/mitum2/base"
+	leveldbstorage "github.com/imfact-labs/mitum2/storage/leveldb"
+	"github.com/imfact-labs/mitum2/util"
+	"github.com/imfact-labs/mitum2/util/encoder"
 	"github.com/pkg/errors"
 	leveldbutil "github.com/syndtr/goleveldb/leveldb/util"
 )

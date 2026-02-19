@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ProtoconNet/mitum2/base"
-	"github.com/ProtoconNet/mitum2/isaac"
-	isaacdatabase "github.com/ProtoconNet/mitum2/isaac/database"
-	leveldbstorage "github.com/ProtoconNet/mitum2/storage/leveldb"
-	"github.com/ProtoconNet/mitum2/util"
+	"github.com/imfact-labs/mitum2/base"
+	"github.com/imfact-labs/mitum2/isaac"
+	isaacdatabase "github.com/imfact-labs/mitum2/isaac/database"
+	leveldbstorage "github.com/imfact-labs/mitum2/storage/leveldb"
+	"github.com/imfact-labs/mitum2/util"
 	"github.com/stretchr/testify/suite"
 )
 
