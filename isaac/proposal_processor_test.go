@@ -29,6 +29,7 @@ type DummyBlockWriter struct {
 	manifesterr  error
 	opstreeg     *fixedtree.Writer
 	ops          []base.Operation
+	receipts     []base.OperationReceiptRecord
 	sts          *util.SingleLockedMap[string, base.StateValueMerger]
 	setstatesf   func(context.Context, uint64, []base.StateMergeValue, base.Operation) error
 	savef        func(context.Context) (base.BlockMap, error)
@@ -44,6 +45,7 @@ func NewDummyBlockWriter(proposal base.ProposalSignFact, getStateFunc base.GetSt
 
 func (w *DummyBlockWriter) SetOperationsSize(n uint64) {
 	w.ops = nil
+	w.receipts = make([]base.OperationReceiptRecord, n)
 	w.opstreeg, _ = fixedtree.NewWriter(base.OperationFixedtreeHint, n)
 }
 
@@ -63,6 +65,23 @@ func (w *DummyBlockWriter) SetProcessResult(ctx context.Context, index uint64, _
 	if err := w.opstreeg.Add(index, node); err != nil {
 		return errors.Wrap(err, "failed to set operation")
 	}
+
+	return nil
+}
+
+func (w *DummyBlockWriter) SetOperationReceipt(
+	_ context.Context,
+	index uint64,
+	ophash, facthash util.Hash,
+	receipt base.OperationReceipt,
+) error {
+	if int(index) >= len(w.receipts) {
+		newreceipts := make([]base.OperationReceiptRecord, index+1)
+		copy(newreceipts, w.receipts)
+		w.receipts = newreceipts
+	}
+
+	w.receipts[index] = base.NewOperationReceiptRecord(ophash, facthash, receipt)
 
 	return nil
 }
@@ -140,6 +159,7 @@ func (w *DummyBlockWriter) Cancel() error {
 type DummyOperationProcessor struct {
 	preprocess func(context.Context, base.Operation, base.GetStateFunc) (context.Context, base.OperationProcessReasonError, error)
 	process    func(context.Context, base.Operation, base.GetStateFunc) ([]base.StateMergeValue, base.OperationProcessReasonError, error)
+	receipt    func() base.OperationReceipt
 }
 
 func (*DummyOperationProcessor) Close() error {
@@ -162,6 +182,14 @@ func (p *DummyOperationProcessor) Process(ctx context.Context, op base.Operation
 	return p.process(ctx, op, getStateFunc)
 }
 
+func (p *DummyOperationProcessor) OperationReceipt() base.OperationReceipt {
+	if p.receipt == nil {
+		return nil
+	}
+
+	return p.receipt()
+}
+
 type testDefaultProposalProcessor struct {
 	BaseTestBallots
 	Encs *encoder.Encoders
@@ -175,6 +203,8 @@ func (t *testDefaultProposalProcessor) SetupSuite() {
 	t.NoError(t.Encs.AddHinter(base.DummyManifest{}))
 	t.NoError(t.Encs.AddHinter(base.DummyBlockMap{}))
 	t.NoError(t.Encs.AddDetail(encoder.DecodeDetail{Hint: base.MPublickeyHint, Instance: &base.MPublickey{}}))
+	t.NoError(t.Encs.AddDetail(encoder.DecodeDetail{Hint: base.BaseOperationReceiptHint, Instance: base.BaseOperationReceipt{}}))
+	t.NoError(t.Encs.AddDetail(encoder.DecodeDetail{Hint: base.OperationReceiptRecordHint, Instance: base.OperationReceiptRecord{}}))
 	t.NoError(t.Encs.AddDetail(encoder.DecodeDetail{Hint: base.StringAddressHint, Instance: base.StringAddress{}}))
 	t.NoError(t.Encs.AddDetail(encoder.DecodeDetail{Hint: base.DummyNodeHint, Instance: base.BaseNode{}}))
 	t.NoError(t.Encs.AddDetail(encoder.DecodeDetail{Hint: DummyOperationFactHint, Instance: DummyOperationFact{}}))
@@ -344,6 +374,60 @@ func (t *testDefaultProposalProcessor) TestCollectOperations() {
 		t.NotNil(b)
 
 		base.EqualSignFact(t.Assert(), a, b)
+	}
+}
+
+func (t *testDefaultProposalProcessor) TestProcessOperationReceipt() {
+	point := base.RawPoint(33, 44)
+
+	ophs, ops, sts := t.prepareOperations(point.Height()-1, 1)
+	pr := t.newproposal(NewProposalFact(point, t.Local.Address(), valuehash.RandomSHA256(), ophs))
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	manifest := base.NewDummyManifest(point.Height(), valuehash.RandomSHA256())
+	writer, newwriterf := t.newBlockWriter()
+	writer.manifest = manifest
+
+	args := t.newargs(newwriterf)
+	args.GetOperationFunc = func(_ context.Context, oph, _ util.Hash) (base.Operation, error) {
+		op, found := ops[oph.String()]
+		if !found {
+			return nil, ErrOperationNotFoundInProcessor.Errorf("operation not found")
+		}
+
+		return op, nil
+	}
+	args.NewOperationProcessorFunc = func(_ base.Height, ht hint.Hint, _ base.GetStateFunc) (base.OperationProcessor, error) {
+		if !ht.IsCompatible(DummyOperationHint) {
+			return nil, nil
+		}
+
+		return &DummyOperationProcessor{
+			preprocess: func(ctx context.Context, _ base.Operation, _ base.GetStateFunc) (context.Context, base.OperationProcessReasonError, error) {
+				return ctx, nil, nil
+			},
+			process: func(_ context.Context, op base.Operation, _ base.GetStateFunc) ([]base.StateMergeValue, base.OperationProcessReasonError, error) {
+				return []base.StateMergeValue{sts[op.Fact().Hash().String()]}, nil, nil
+			},
+			receipt: func() base.OperationReceipt {
+				receipt := base.NewBaseOperationReceipt()
+
+				return receipt
+			},
+		}, nil
+	}
+
+	opp, _ := NewDefaultProposalProcessor(pr, previous, args)
+
+	m, err := opp.Process(context.Background(), nil)
+	t.NoError(err)
+	t.NotNil(m)
+
+	if t.Len(writer.receipts, 1) {
+		record := writer.receipts[0]
+		t.True(record.OperationHash().Equal(ophs[0][0]))
+		t.True(record.FactHash().Equal(ophs[0][1]))
+		t.NotNil(record.Receipt())
 	}
 }
 

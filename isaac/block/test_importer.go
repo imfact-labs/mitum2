@@ -89,7 +89,9 @@ func (t *BaseTestLocalBlockFS) SetupSuite() {
 
 	t.NoError(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.DummyOperationFactHint, Instance: isaac.DummyOperationFact{}}))
 	t.NoError(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.DummyOperationHint, Instance: isaac.DummyOperation{}}))
+	t.NoError(t.Enc.Add(encoder.DecodeDetail{Hint: base.BaseOperationReceiptHint, Instance: base.BaseOperationReceipt{}}))
 	t.NoError(t.Enc.Add(encoder.DecodeDetail{Hint: base.OperationFixedtreeHint, Instance: base.OperationFixedtreeNode{}}))
+	t.NoError(t.Enc.Add(encoder.DecodeDetail{Hint: base.OperationReceiptRecordHint, Instance: base.OperationReceiptRecord{}}))
 	t.NoError(t.Enc.Add(encoder.DecodeDetail{Hint: base.StateFixedtreeHint, Instance: fixedtree.BaseNode{}}))
 	t.NoError(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.INITBallotFactHint, Instance: isaac.INITBallotFact{}}))
 	t.NoError(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.ACCEPTBallotFactHint, Instance: isaac.ACCEPTBallotFact{}}))

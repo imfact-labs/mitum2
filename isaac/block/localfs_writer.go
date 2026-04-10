@@ -135,6 +135,56 @@ func (w *LocalFSWriter) SetOperation(_ context.Context, total, _ uint64, op base
 	return nil
 }
 
+func (w *LocalFSWriter) SetOperationReceipts(
+	_ context.Context,
+	receipts []base.OperationReceiptRecord,
+) error {
+	if len(receipts) < 1 {
+		return nil
+	}
+
+	e := util.StringError("set operation receipts")
+
+	f, err := w.newChecksumWriter(base.BlockItemOperationReceipts)
+	if err != nil {
+		return e.Wrap(err)
+	}
+
+	defer func() {
+		_ = f.Close()
+	}()
+
+	if err := writeCountHeader(f, LocalFSWriterHint, w.enc.Hint(), uint64(len(receipts))); err != nil {
+		return e.Wrap(err)
+	}
+
+	for i := range receipts {
+		if err := receipts[i].IsValid(nil); err != nil {
+			return e.Wrap(err)
+		}
+
+		if err := w.appendfile(f, receipts[i]); err != nil {
+			return e.Wrap(err)
+		}
+	}
+
+	if err := w.m.SetItem(NewBlockMapItem(
+		base.BlockItemOperationReceipts,
+		f.Checksum(),
+	)); err != nil {
+		return e.Wrap(err)
+	}
+
+	if _, err := w.bfiles.SetItem(
+		base.BlockItemOperationReceipts,
+		isaac.NewLocalFSBlockItemFile(f.Name(), ""),
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (w *LocalFSWriter) SetOperationsTree(ctx context.Context, tr fixedtree.Tree) error {
 	if err := w.setTree(
 		ctx,
@@ -782,6 +832,7 @@ func isCompressedBlockItemType(t base.BlockItemType) bool {
 	switch t {
 	case base.BlockItemProposal,
 		base.BlockItemOperations,
+		base.BlockItemOperationReceipts,
 		base.BlockItemOperationsTree,
 		base.BlockItemStates,
 		base.BlockItemStatesTree:

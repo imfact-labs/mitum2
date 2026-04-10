@@ -69,7 +69,7 @@ func (r *ItemReader) Decode() (interface{}, error) {
 	switch r.t {
 	case base.BlockItemMap, base.BlockItemProposal:
 		return r.decodeOneItem()
-	case base.BlockItemOperations, base.BlockItemStates:
+	case base.BlockItemOperations, base.BlockItemOperationReceipts, base.BlockItemStates:
 		i, n, err := r.decodeCountItems(nil)
 		if err != nil {
 			return nil, err
@@ -101,7 +101,7 @@ func (r *ItemReader) DecodeItems(f func(uint64, uint64, interface{}) error) (uin
 		base.BlockItemStatesTree,
 		base.BlockItemStatesTree:
 		return 0, errors.Errorf("unsupported items type, %q", r.t)
-	case base.BlockItemOperations, base.BlockItemStates:
+	case base.BlockItemOperations, base.BlockItemOperationReceipts, base.BlockItemStates:
 		_, n, err := r.decodeCountItems(f)
 
 		return n, err

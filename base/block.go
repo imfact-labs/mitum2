@@ -39,13 +39,14 @@ type BlockMapItem interface {
 type BlockItemType string
 
 var (
-	BlockItemMap            BlockItemType = "map"
-	BlockItemProposal       BlockItemType = "proposal"
-	BlockItemOperations     BlockItemType = "operations"
-	BlockItemOperationsTree BlockItemType = "operations_tree"
-	BlockItemStates         BlockItemType = "states"
-	BlockItemStatesTree     BlockItemType = "states_tree"
-	BlockItemVoteproofs     BlockItemType = "voteproofs"
+	BlockItemMap               BlockItemType = "map"
+	BlockItemProposal          BlockItemType = "proposal"
+	BlockItemOperations        BlockItemType = "operations"
+	BlockItemOperationReceipts BlockItemType = "operation_receipts"
+	BlockItemOperationsTree    BlockItemType = "operations_tree"
+	BlockItemStates            BlockItemType = "states"
+	BlockItemStatesTree        BlockItemType = "states_tree"
+	BlockItemVoteproofs        BlockItemType = "voteproofs"
 )
 
 func (t BlockItemType) IsValid([]byte) error {
@@ -53,6 +54,7 @@ func (t BlockItemType) IsValid([]byte) error {
 	case BlockItemMap,
 		BlockItemProposal,
 		BlockItemOperations,
+		BlockItemOperationReceipts,
 		BlockItemOperationsTree,
 		BlockItemStates,
 		BlockItemStatesTree,

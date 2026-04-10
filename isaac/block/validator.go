@@ -289,6 +289,15 @@ func IsValidBlockFromLocalFS(
 		return err
 	}
 
+	switch receipts, found, err := LoadOperationReceiptsFromReader(bm, itemf, height); {
+	case err != nil:
+		return err
+	case found:
+		if err := IsValidOperationReceiptsOfBlock(receipts, ops); err != nil {
+			return err
+		}
+	}
+
 	if err := pr.IsValid(networkID); err != nil {
 		return err
 	}
@@ -332,6 +341,8 @@ func LoadBlockItemsFromReader( //revive:disable-line:function-result-limit
 			return decodeBlockItemFromReader[[2]base.Voteproof](itemf, height, item, &vps)
 		case base.BlockItemOperations:
 			return decodeBlockItemsFromReader[base.Operation](itemf, height, item, &ops)
+		case base.BlockItemOperationReceipts:
+			return nil
 		case base.BlockItemStates:
 			return decodeBlockItemsFromReader[base.State](itemf, height, item, &sts)
 		default:
@@ -348,6 +359,26 @@ func LoadBlockItemsFromReader( //revive:disable-line:function-result-limit
 	})
 
 	return pr, ops, sts, opstree, ststree, vps, rerr
+}
+
+func LoadOperationReceiptsFromReader(
+	bm base.BlockMap,
+	itemf isaac.BlockItemReadersItemFunc,
+	height base.Height,
+) ([]base.OperationReceiptRecord, bool, error) {
+	if _, found := bm.Item(base.BlockItemOperationReceipts); !found {
+		return nil, false, nil
+	}
+
+	_, receipts, found, err := isaac.BlockItemReadersDecodeItems[base.OperationReceiptRecord](
+		itemf,
+		height,
+		base.BlockItemOperationReceipts,
+		nil,
+		nil,
+	)
+
+	return receipts, found, err
 }
 
 func decodeBlockItemFromReader[T any](
@@ -463,6 +494,47 @@ func IsValidStatesOfBlock( //nolint:dupl //...
 		); err != nil {
 			return e.Wrap(err)
 		}
+	}
+
+	return nil
+}
+
+func IsValidOperationReceiptsOfBlock(
+	receipts []base.OperationReceiptRecord,
+	ops []base.Operation,
+) error {
+	e := util.StringError("validate operation receipts")
+
+	if len(receipts) != len(ops) {
+		return e.Errorf("receipt count does not match operations")
+	}
+
+	if len(receipts) < 1 {
+		return nil
+	}
+
+	if err := util.BatchWork(context.Background(), int64(len(receipts)), 333, //nolint:gomnd //...
+		func(context.Context, uint64) error { return nil },
+		func(_ context.Context, i, _ uint64) error {
+			record := receipts[i]
+			op := ops[i]
+
+			if err := record.IsValid(nil); err != nil {
+				return err
+			}
+
+			if !record.OperationHash().Equal(op.Hash()) {
+				return errors.Errorf("receipt operation hash does not match")
+			}
+
+			if !record.FactHash().Equal(op.Fact().Hash()) {
+				return errors.Errorf("receipt fact hash does not match")
+			}
+
+			return nil
+		},
+	); err != nil {
+		return e.Wrap(err)
 	}
 
 	return nil

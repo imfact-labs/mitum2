@@ -496,14 +496,27 @@ func (p *DefaultProposalProcessor) doProcessOperation(
 	e := util.StringError("process operation, %q", op.Fact().Hash())
 
 	var f func(context.Context) ([]base.StateMergeValue, base.OperationProcessReasonError, error)
+	var receiptf func() base.OperationReceipt
 
-	switch i, err := p.getProcessor(newOperationProcessor, op); {
+	switch opp, found, err := p.getOperationProcessor(newOperationProcessor, op.Hint()); {
 	case err != nil:
-		return err
-	case i == nil:
-		return nil // NOTE ignore
+		return errors.Wrap(err, "get OperationProcessor for Process")
+	case found:
+		f = func(ctx context.Context) ([]base.StateMergeValue, base.OperationProcessReasonError, error) {
+			return opp.Process(ctx, op, p.getStateFunc) //nolint:wrapcheck //...
+		}
+
+		if i, ok := opp.(base.OperationReceiptProvider); ok {
+			receiptf = i.OperationReceipt
+		}
 	default:
-		f = i
+		f = func(ctx context.Context) ([]base.StateMergeValue, base.OperationProcessReasonError, error) {
+			return op.Process(ctx, p.getStateFunc) //nolint:wrapcheck //...
+		}
+
+		if i, ok := op.(base.OperationReceiptProvider); ok {
+			receiptf = i.OperationReceipt
+		}
 	}
 
 	stvs, errorreason, err := f(ctx)
@@ -527,6 +540,17 @@ func (p *DefaultProposalProcessor) doProcessOperation(
 
 	if err := writer.SetProcessResult(
 		ctx, opsindex, op.Hash(), op.Fact().Hash(), instate, errorreason,
+	); err != nil {
+		return e.Wrap(err)
+	}
+
+	var receipt base.OperationReceipt
+	if receiptf != nil {
+		receipt = receiptf()
+	}
+
+	if err := writer.SetOperationReceipt(
+		ctx, opsindex, op.Hash(), op.Fact().Hash(), receipt,
 	); err != nil {
 		return e.Wrap(err)
 	}

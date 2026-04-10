@@ -16,6 +16,7 @@ import (
 type FSWriter interface {
 	SetProposal(context.Context, base.ProposalSignFact) error
 	SetOperation(_ context.Context, total, index uint64, _ base.Operation) error
+	SetOperationReceipts(context.Context, []base.OperationReceiptRecord) error
 	SetOperationsTree(context.Context, fixedtree.Tree) error
 	SetState(_ context.Context, total, index uint64, _ base.State) error
 	SetStatesTree(context.Context, fixedtree.Tree) error
@@ -40,6 +41,9 @@ type Writer struct {
 	statesMerger  StatesMerger
 	ststree       fixedtree.Tree
 	workersize    int64
+	receipts      []base.OperationReceiptRecord
+	receiptSet    []bool
+	hasReceipts   bool
 	sync.RWMutex
 }
 
@@ -97,6 +101,9 @@ func (w *Writer) SetOperationsSize(n uint64) {
 	}
 
 	w.opstreeg = opstreeg
+	w.receipts = make([]base.OperationReceiptRecord, n)
+	w.receiptSet = make([]bool, n)
+	w.hasReceipts = false
 }
 
 func (w *Writer) SetProcessResult( // revive:disable-line:flag-parameter
@@ -131,6 +138,36 @@ func (w *Writer) SetProcessResult( // revive:disable-line:flag-parameter
 	if err := w.opstreeg.Add(index, node); err != nil {
 		return e.WithMessage(err, "set operation")
 	}
+
+	return nil
+}
+
+func (w *Writer) SetOperationReceipt(
+	_ context.Context,
+	index uint64,
+	op, facthash util.Hash,
+	receipt base.OperationReceipt,
+) error {
+	e := util.StringError("set operation receipt")
+
+	if w.receipts == nil {
+		return nil
+	}
+
+	if index >= uint64(len(w.receipts)) {
+		return e.Errorf("receipt index out of range")
+	}
+
+	if receipt != nil {
+		if err := receipt.IsValid(nil); err != nil {
+			return e.Wrap(err)
+		}
+
+		w.hasReceipts = true
+	}
+
+	w.receipts[index] = base.NewOperationReceiptRecord(op, facthash, receipt)
+	w.receiptSet[index] = true
 
 	return nil
 }
@@ -401,6 +438,9 @@ func (w *Writer) close() error {
 	w.getStateFunc = nil
 	_ = w.statesMerger.Close()
 	w.ststree = fixedtree.Tree{}
+	w.receipts = nil
+	w.receiptSet = nil
+	w.hasReceipts = false
 
 	return nil
 }
@@ -431,6 +471,18 @@ func (w *Writer) waitSaveWorker(ctx context.Context) error {
 
 	if w.opstree.Len() > 0 {
 		if err := w.fswriter.SetOperationsTree(ctx, w.opstree); err != nil {
+			return err
+		}
+	}
+
+	if w.hasReceipts {
+		for i := range w.receiptSet {
+			if !w.receiptSet[i] {
+				return errors.Errorf("receipt not set, %d", i)
+			}
+		}
+
+		if err := w.fswriter.SetOperationReceipts(ctx, w.receipts); err != nil {
 			return err
 		}
 	}

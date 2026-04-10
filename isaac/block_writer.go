@@ -18,6 +18,12 @@ type BlockWriter interface {
 		instate bool,
 		errorreason base.OperationProcessReasonError,
 	) error
+	SetOperationReceipt(
+		_ context.Context,
+		index uint64,
+		ophash, facthash util.Hash,
+		receipt base.OperationReceipt,
+	) error
 	SetStates(_ context.Context, index uint64, values []base.StateMergeValue, operation base.Operation) error
 	Manifest(_ context.Context, previous base.Manifest) (base.Manifest, error)
 	SetINITVoteproof(context.Context, base.INITVoteproof) error

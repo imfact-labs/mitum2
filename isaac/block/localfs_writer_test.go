@@ -23,16 +23,17 @@ import (
 )
 
 type DummyBlockFSWriter struct {
-	setProposalf        func(context.Context, base.ProposalSignFact) error
-	setOperationf       func(context.Context, uint64, uint64, base.Operation) error
-	setOperationsTreef  func(context.Context, fixedtree.Tree) error
-	setStatef           func(context.Context, uint64, uint64, base.State) error
-	setStatesTreef      func(context.Context, fixedtree.Tree) error
-	setManifestf        func(context.Context, base.Manifest) error
-	setINITVoteprooff   func(context.Context, base.INITVoteproof) error
-	setACCEPTVoteprooff func(context.Context, base.ACCEPTVoteproof) error
-	savef               func(context.Context) (base.BlockMap, error)
-	cancelf             func() error
+	setProposalf          func(context.Context, base.ProposalSignFact) error
+	setOperationf         func(context.Context, uint64, uint64, base.Operation) error
+	setOperationReceiptsf func(context.Context, []base.OperationReceiptRecord) error
+	setOperationsTreef    func(context.Context, fixedtree.Tree) error
+	setStatef             func(context.Context, uint64, uint64, base.State) error
+	setStatesTreef        func(context.Context, fixedtree.Tree) error
+	setManifestf          func(context.Context, base.Manifest) error
+	setINITVoteprooff     func(context.Context, base.INITVoteproof) error
+	setACCEPTVoteprooff   func(context.Context, base.ACCEPTVoteproof) error
+	savef                 func(context.Context) (base.BlockMap, error)
+	cancelf               func() error
 }
 
 func (w *DummyBlockFSWriter) SetProposal(ctx context.Context, pr base.ProposalSignFact) error {
@@ -45,6 +46,13 @@ func (w *DummyBlockFSWriter) SetProposal(ctx context.Context, pr base.ProposalSi
 func (w *DummyBlockFSWriter) SetOperation(ctx context.Context, total, index uint64, op base.Operation) error {
 	if w.setOperationf != nil {
 		return w.setOperationf(ctx, total, index, op)
+	}
+	return nil
+}
+
+func (w *DummyBlockFSWriter) SetOperationReceipts(ctx context.Context, receipts []base.OperationReceiptRecord) error {
+	if w.setOperationReceiptsf != nil {
+		return w.setOperationReceiptsf(ctx, receipts)
 	}
 	return nil
 }
@@ -507,6 +515,62 @@ func (t *testLocalFSWriter) TestSetOperations() {
 
 		t.Equal(item.Checksum(), util.SHA256Checksum(b))
 	})
+}
+
+func (t *testLocalFSWriter) TestSetOperationReceipts() {
+	point := base.RawPoint(33, 44)
+
+	fs, err := NewLocalFSWriter(t.Root, point.Height(), t.Enc, t.Enc, t.Local, t.LocalParams.NetworkID())
+	t.NoError(err)
+
+	records := make([]base.OperationReceiptRecord, 3)
+	for i := range records {
+		fact := isaac.NewDummyOperationFact(util.UUID().Bytes(), valuehash.RandomSHA256())
+		op, err := isaac.NewDummyOperation(fact, t.Local.Privatekey(), t.LocalParams.NetworkID())
+		t.NoError(err)
+
+		var receipt base.OperationReceipt
+		if i%2 == 0 {
+			r := base.NewBaseOperationReceipt()
+			receipt = r
+		}
+
+		records[i] = base.NewOperationReceiptRecord(op.Hash(), op.Fact().Hash(), receipt)
+	}
+
+	t.NoError(fs.SetOperationReceipts(context.Background(), records))
+
+	fpath, f, err := t.findTempFile(fs.temp, base.BlockItemOperationReceipts, true)
+	t.NoError(err)
+	t.T().Log("temp file:", fpath)
+	t.NotNil(f)
+
+	item, found := fs.m.Item(base.BlockItemOperationReceipts)
+	t.True(found)
+	t.NoError(item.IsValid(nil))
+
+	count, decoded, err := isaac.BlockItemReadersDecodeItemsFromReader[base.OperationReceiptRecord](
+		t.Readers.ItemFromReader,
+		base.BlockItemOperationReceipts,
+		f,
+		"gz",
+		nil,
+		nil,
+	)
+	t.NoError(err)
+	t.Equal(uint64(len(records)), count)
+	t.Equal(len(records), len(decoded))
+
+	for i := range decoded {
+		t.True(decoded[i].OperationHash().Equal(records[i].OperationHash()))
+		t.True(decoded[i].FactHash().Equal(records[i].FactHash()))
+		switch {
+		case records[i].Receipt() == nil:
+			t.Nil(decoded[i].Receipt())
+		default:
+			t.NotNil(decoded[i].Receipt())
+		}
+	}
 }
 
 func (t *testLocalFSWriter) TestSetStates() {
