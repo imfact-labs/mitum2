@@ -422,6 +422,14 @@ func (p *DefaultProposalProcessor) processOperation(
 			return ctx, false, err
 		}
 
+		if err := worker.NewJob(func(ctx context.Context, _ uint64) error {
+			return writer.SetOperationReceipt(
+				ctx, uint64(opsindex), rop.OperationHash(), rop.FactHash(), nil,
+			)
+		}); err != nil {
+			return ctx, false, err
+		}
+
 		return ctx, true, nil
 	}
 
@@ -438,6 +446,14 @@ func (p *DefaultProposalProcessor) processOperation(
 
 			return writer.SetProcessResult(
 				ctx, uint64(opsindex), op.Hash(), op.Fact().Hash(), false, reasonerr,
+			)
+		}); err != nil {
+			return pctx, false, err
+		}
+
+		if err := worker.NewJob(func(ctx context.Context, _ uint64) error {
+			return writer.SetOperationReceipt(
+				ctx, uint64(opsindex), op.Hash(), op.Fact().Hash(), nil,
 			)
 		}); err != nil {
 			return pctx, false, err
