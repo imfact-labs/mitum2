@@ -207,6 +207,7 @@ func (t *baseTestBallotFactEncode) SetupTest() {
 	t.NoError(t.enc.Add(encoder.DecodeDetail{Hint: ACCEPTBallotFactHint, Instance: ACCEPTBallotFact{}}))
 	t.NoError(t.enc.Add(encoder.DecodeDetail{Hint: SuffrageConfirmBallotFactHint, Instance: SuffrageConfirmBallotFact{}}))
 	t.NoError(t.enc.Add(encoder.DecodeDetail{Hint: EmptyProposalINITBallotFactHint, Instance: EmptyProposalINITBallotFact{}}))
+	t.NoError(t.enc.Add(encoder.DecodeDetail{Hint: ProposalUnavailableINITBallotFactHint, Instance: ProposalUnavailableINITBallotFact{}}))
 	t.NoError(t.enc.Add(encoder.DecodeDetail{Hint: EmptyOperationsACCEPTBallotFactHint, Instance: EmptyOperationsACCEPTBallotFact{}}))
 	t.NoError(t.enc.Add(encoder.DecodeDetail{Hint: NotProcessedACCEPTBallotFactHint, Instance: NotProcessedACCEPTBallotFact{}}))
 }
@@ -324,6 +325,66 @@ func TestEmptyProposalINITBallotFactJSON(tt *testing.T) {
 	}
 
 	suite.Run(tt, t)
+}
+
+func TestProposalUnavailableINITBallotFactJSON(tt *testing.T) {
+	t := testBallotFactEncode()
+
+	point := base.RawPoint(33, 44)
+
+	t.Encode = func() (interface{}, []byte) {
+		bl := NewProposalUnavailableINITBallotFact(point, valuehash.RandomSHA256())
+
+		b, err := t.enc.Marshal(&bl)
+		t.NoError(err)
+
+		t.T().Log("marshaled:", string(b))
+
+		return bl, b
+	}
+	t.Decode = func(b []byte) interface{} {
+		i, err := t.enc.Decode(b)
+		t.NoError(err)
+
+		_, ok := i.(ProposalUnavailableINITBallotFact)
+		t.True(ok)
+
+		return i
+	}
+
+	t.compare = func(a, b base.BallotFact) {
+		ab, ok := a.(ProposalUnavailableINITBallotFact)
+		t.True(ok)
+		bb, ok := b.(ProposalUnavailableINITBallotFact)
+		t.True(ok)
+
+		t.True(ab.Hash().Equal(bb.Hash()))
+		t.Equal(ab.r, bb.r)
+		t.True(ab.Proposal().Equal(bb.Proposal()))
+		t.True(ab.PreviousBlock().Equal(bb.PreviousBlock()))
+	}
+
+	suite.Run(tt, t)
+}
+
+func TestProposalUnavailableINITBallotFactScatterAndMarker(tt *testing.T) {
+	point := base.RawPoint(33, 44)
+	previousBlock := valuehash.RandomSHA256()
+
+	a := NewProposalUnavailableINITBallotFact(point, previousBlock)
+	b := NewProposalUnavailableINITBallotFact(point, previousBlock)
+
+	if a.Hash().Equal(b.Hash()) {
+		tt.Fatal("expected different hashes")
+	}
+
+	if !a.Proposal().Equal(b.Proposal()) {
+		tt.Fatal("expected same proposal marker")
+	}
+
+	if err := a.Proposal().IsValid(nil); err != nil {
+		tt.Fatal(err)
+	}
 }
 
 func TestACCEPTBallotFactJSON(tt *testing.T) {

@@ -166,3 +166,35 @@ func (fact *EmptyProposalINITBallotFact) DecodeJSON(b []byte, enc encoder.Encode
 
 	return nil
 }
+
+type ProposalUnavailableINITBallotFactJSONMarshaler struct {
+	R string `json:"r"`
+	INITBallotFactJSONMarshaler
+}
+
+func (fact ProposalUnavailableINITBallotFact) MarshalJSON() ([]byte, error) {
+	return util.MarshalJSON(ProposalUnavailableINITBallotFactJSONMarshaler{
+		INITBallotFactJSONMarshaler: fact.INITBallotFact.jsonMarshaler(),
+		R:                           fact.r,
+	})
+}
+
+func (fact *ProposalUnavailableINITBallotFact) DecodeJSON(b []byte, enc encoder.Encoder) error {
+	e := util.StringError("decode ProposalUnavailableINITBallotFact")
+
+	if err := fact.INITBallotFact.DecodeJSON(b, enc); err != nil {
+		return e.Wrap(err)
+	}
+
+	var u struct {
+		R string `json:"r"`
+	}
+
+	if err := enc.Unmarshal(b, &u); err != nil {
+		return e.Wrap(err)
+	}
+
+	fact.r = u.R
+
+	return nil
+}

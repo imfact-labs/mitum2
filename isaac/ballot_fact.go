@@ -8,12 +8,13 @@ import (
 )
 
 var (
-	INITBallotFactHint                  = hint.MustNewHint("init-ballot-fact-v0.0.1")
-	ACCEPTBallotFactHint                = hint.MustNewHint("accept-ballot-fact-v0.0.1")
-	SuffrageConfirmBallotFactHint       = hint.MustNewHint("suffrage-confirm-ballot-fact-v0.0.1")
-	EmptyProposalINITBallotFactHint     = hint.MustNewHint("empty-proposal-init-ballot-fact-v0.0.1")
-	EmptyOperationsACCEPTBallotFactHint = hint.MustNewHint("empty-operations-accept-ballot-fact-v0.0.1")
-	NotProcessedACCEPTBallotFactHint    = hint.MustNewHint("not-processed-accept-ballot-fact-v0.0.1")
+	INITBallotFactHint                    = hint.MustNewHint("init-ballot-fact-v0.0.1")
+	ACCEPTBallotFactHint                  = hint.MustNewHint("accept-ballot-fact-v0.0.1")
+	SuffrageConfirmBallotFactHint         = hint.MustNewHint("suffrage-confirm-ballot-fact-v0.0.1")
+	EmptyProposalINITBallotFactHint       = hint.MustNewHint("empty-proposal-init-ballot-fact-v0.0.1")
+	ProposalUnavailableINITBallotFactHint = hint.MustNewHint("proposal-unavailable-init-ballot-fact-v0.0.1")
+	EmptyOperationsACCEPTBallotFactHint   = hint.MustNewHint("empty-operations-accept-ballot-fact-v0.0.1")
+	NotProcessedACCEPTBallotFactHint      = hint.MustNewHint("not-processed-accept-ballot-fact-v0.0.1")
 )
 
 type ExpelBallotFact interface {
@@ -324,6 +325,58 @@ func (fact EmptyProposalINITBallotFact) generateHash() util.Hash {
 		fact.INITBallotFact.hashBytes(),
 		[]byte(fact.r),
 	))
+}
+
+type ProposalUnavailableINITBallotFact struct {
+	r string
+	INITBallotFact
+}
+
+func NewProposalUnavailableINITBallotFact(
+	point base.Point,
+	previousBlock util.Hash,
+) ProposalUnavailableINITBallotFact {
+	marker := valuehash.NewSHA256(util.ConcatBytesSlice(point.Bytes(), previousBlock.Bytes()))
+
+	fact := ProposalUnavailableINITBallotFact{
+		INITBallotFact: newINITBallotFact(ProposalUnavailableINITBallotFactHint, point, previousBlock, marker, nil),
+		r:              util.UUID().String(),
+	}
+
+	fact.SetHash(fact.generateHash())
+
+	return fact
+}
+
+func (fact ProposalUnavailableINITBallotFact) IsValid([]byte) error {
+	e := util.ErrInvalid.Errorf("invalid ProposalUnavailableINITBallotFact")
+
+	if err := fact.baseBallotFact.IsValid(nil); err != nil {
+		return e.Wrap(err)
+	}
+
+	if err := base.IsValidINITBallotFact(fact); err != nil {
+		return e.Wrap(err)
+	}
+
+	if len(fact.r) < 1 {
+		return e.Errorf("empty r")
+	}
+
+	return nil
+}
+
+func (fact ProposalUnavailableINITBallotFact) generateHash() util.Hash {
+	return valuehash.NewSHA256(util.ConcatBytesSlice(
+		fact.INITBallotFact.hashBytes(),
+		[]byte(fact.r),
+	))
+}
+
+func IsProposalUnavailableINITBallotFact(fact base.Fact) bool {
+	_, ok := fact.(ProposalUnavailableINITBallotFact)
+
+	return ok
 }
 
 type EmptyOperationsACCEPTBallotFact struct {
