@@ -86,6 +86,9 @@ func (vp baseVoteproof) Majority() base.BallotFact {
 func (vp *baseVoteproof) SetMajority(fact base.BallotFact) *baseVoteproof {
 	_, isEmpty := fact.(EmptyProposalINITBallotFact)
 	if !isEmpty {
+		_, isEmpty = fact.(ProposalUnavailableINITBallotFact)
+	}
+	if !isEmpty {
 		_, isEmpty = fact.(EmptyOperationsACCEPTBallotFact)
 	}
 

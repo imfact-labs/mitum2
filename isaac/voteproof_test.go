@@ -307,6 +307,28 @@ func (t *testVoteproof) TestEmptyProposalINITBallotFact() {
 	t.Equal(base.VoteResultDraw, ivp.Result())
 }
 
+func (t *testVoteproof) TestProposalUnavailableINITBallotFact() {
+	fact := NewProposalUnavailableINITBallotFact(base.RawPoint(33, 55), valuehash.RandomSHA256())
+
+	node := base.RandomAddress("")
+	signfact := NewINITBallotSignFact(fact)
+
+	t.NoError(signfact.NodeSign(t.local.Privatekey(), t.networkID, node))
+
+	ivp := NewINITVoteproof(fact.Point().Point)
+	ivp.
+		SetMajority(fact).
+		SetSignFacts([]base.BallotSignFact{signfact}).
+		SetThreshold(base.Threshold(100)).
+		Finish()
+
+	t.NoError(ivp.IsValid(t.networkID))
+
+	t.Nil(ivp.Majority())
+	t.Nil(ivp.BallotMajority())
+	t.Equal(base.VoteResultDraw, ivp.Result())
+}
+
 func (t *testVoteproof) TestEmptyOpertionsACCEPTBallotFact() {
 	fact := NewEmptyOperationsACCEPTBallotFact(base.RawPoint(33, 55), valuehash.RandomSHA256())
 

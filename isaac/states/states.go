@@ -848,6 +848,9 @@ func mimicBallot(
 		if _, ok := t.(isaac.EmptyProposalINITBallotFact); ok {
 			t = isaac.NewEmptyProposalINITBallotFact(t.Point().Point, t.PreviousBlock(), t.Proposal())
 		}
+		if _, ok := t.(isaac.ProposalUnavailableINITBallotFact); ok {
+			t = isaac.NewProposalUnavailableINITBallotFact(t.Point().Point, t.PreviousBlock())
+		}
 
 		sf := isaac.NewINITBallotSignFact(t)
 
