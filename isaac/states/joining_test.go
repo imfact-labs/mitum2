@@ -69,7 +69,7 @@ func (t *testJoiningHandler) newState(args *JoiningHandlerArgs) (*JoiningHandler
 	})
 	st.bbt = newBallotBroadcastTimers(timers, func(_ context.Context, bl base.Ballot) error {
 		return st.ballotBroadcaster.Broadcast(bl)
-	}, args.IntervalBroadcastBallot())
+	}, args.IntervalBroadcastBallot, func() int { return 1 })
 	t.NoError(st.bbt.Start(context.Background()))
 
 	st.switchStateFunc = func(switchContext) error {

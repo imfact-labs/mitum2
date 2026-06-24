@@ -13,12 +13,13 @@ import (
 )
 
 var errFailedToRequestProposalToNode = util.NewIDError("request proposal to node")
+var ErrProposalSelectionFailed = util.NewIDError("proposal selection failed")
 
 type ProposalSelectFunc func(
 	_ context.Context,
 	_ base.Point,
 	previousBlock util.Hash,
-	wait time.Duration, // NOTE wait to get proposal from 1st proposal, if failed, get from next others
+	wait time.Duration,
 ) (base.ProposalSignFact, error)
 
 type BaseProposalSelectorArgs struct {
@@ -71,19 +72,6 @@ func (p *BaseProposalSelector) Select(
 	wait time.Duration,
 ) (base.ProposalSignFact, error) {
 	switch pr, err := p.selectInternal(ctx, point, previousBlock, wait); {
-	case errors.Is(err, errFailedToRequestProposalToNode),
-		errors.Is(err, context.Canceled),
-		errors.Is(err, context.DeadlineExceeded):
-		pr, err = p.args.Maker.Make(ctx, point, previousBlock)
-		if err != nil {
-			return nil, err
-		}
-
-		if _, eerr := p.args.Pool.SetProposal(pr); eerr != nil {
-			return nil, eerr
-		}
-
-		return pr, nil
 	case err != nil:
 		return nil, err
 	default:
@@ -118,41 +106,32 @@ func (p *BaseProposalSelector) selectInternal(
 
 		return nil, errors.WithMessagef(err, "get suffrage for height, %d", point.Height())
 	case len(i) < 2:
-		return p.proposalFromNode(wctx, point, i[0], previousBlock)
+		pr, err := p.proposalFromNode(wctx, point, i[0], previousBlock)
+		if err != nil {
+			return nil, p.handleProposalRequestFailure(ctx, point, i[0], previousBlock, err)
+		}
+
+		return pr, nil
 	default:
 		nodes = i
 	}
-
-	var failed base.Address
 
 	switch pr, proposer, err := p.selectFromProposer(wctx, point, nodes, previousBlock); {
 	case errors.Is(err, errFailedToRequestProposalToNode),
 		errors.Is(err, context.Canceled),
 		errors.Is(err, context.DeadlineExceeded):
-		failed = proposer
+		return nil, p.handleProposalRequestFailure(ctx, point, p.findNode(nodes, proposer), previousBlock, err)
 	case err != nil:
 		return nil, err
 	case pr != nil:
 		return pr, nil
 	default:
-		failed = proposer
+		return nil, ErrProposalSelectionFailed.Errorf(
+			"selected proposer did not provide proposal, point=%v previous_block=%q",
+			point,
+			previousBlock,
+		)
 	}
-
-	if failed != nil {
-		nodes = p.filterDeadNodes(nodes, []base.Address{failed})
-	}
-
-	if len(nodes) < 1 {
-		return nil, errFailedToRequestProposalToNode.Errorf("empty nodes")
-	}
-
-	// NOTE if failed from original proposer, request to the other nodes. The
-	// previous context may be already expired, so proposalFromOthers uses new
-	// context.
-	wctx, cancel = context.WithTimeout(ctx, pwait)
-	defer cancel()
-
-	return p.proposalFromOthers(wctx, point, nodes, previousBlock)
 }
 
 func (p *BaseProposalSelector) selectFromProposer(
@@ -204,54 +183,6 @@ func (p *BaseProposalSelector) proposalFromNode(
 				// is from main context, it will be catched from the main select
 				// ctx.Done().
 			case errors.Is(err, errFailedToRequestProposalToNode):
-			default:
-				return nil, errors.WithMessage(err, "find proposal")
-			}
-		}
-	}
-}
-
-func (p *BaseProposalSelector) proposalFromOthers(
-	ctx context.Context,
-	point base.Point,
-	nodes []base.Node,
-	previousBlock util.Hash,
-) (base.ProposalSignFact, error) {
-	if len(nodes) < 1 {
-		return nil, errors.Errorf("empty nodes")
-	}
-
-	ticker := time.NewTicker(1)
-	defer ticker.Stop()
-
-	var reset sync.Once
-
-	filtered := nodes
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, errors.WithStack(ctx.Err())
-		case <-ticker.C:
-			reset.Do(func() {
-				ticker.Reset(p.args.RequestProposalInterval)
-			})
-
-			proposer, err := p.args.ProposerSelectFunc(ctx, point, filtered, previousBlock)
-			if err != nil {
-				return nil, errors.WithMessage(err, "select proposer")
-			}
-
-			switch pr, err := p.findProposal(ctx, point, proposer, previousBlock); {
-			case err == nil:
-				return pr, nil
-			case errors.Is(err, errFailedToRequestProposalToNode):
-				// NOTE if failed to request to remote node, remove the node from
-				// candidates.
-				filtered = p.filterDeadNodes(filtered, []base.Address{proposer.Address()})
-				if len(filtered) < 1 {
-					return nil, errors.WithMessage(err, "no valid nodes left")
-				}
 			default:
 				return nil, errors.WithMessage(err, "find proposal")
 			}
@@ -332,15 +263,6 @@ func (p *BaseProposalSelector) findProposalFromProposer(
 	return nil, errors.Errorf("empty proposal")
 }
 
-func (*BaseProposalSelector) filterDeadNodes(n []base.Node, b []base.Address) []base.Node {
-	return util.Filter2Slices( // NOTE filter long dead nodes
-		n, b,
-		func(x base.Node, y base.Address) bool {
-			return x.Address().Equal(y)
-		},
-	)
-}
-
 func (*BaseProposalSelector) getNodes(
 	height base.Height,
 	f func(base.Height) ([]base.Node, bool, error),
@@ -359,6 +281,46 @@ func (*BaseProposalSelector) getNodes(
 
 		return nodes, true, nil
 	}
+}
+
+func (p *BaseProposalSelector) handleProposalRequestFailure(
+	ctx context.Context,
+	point base.Point,
+	proposer base.Node,
+	previousBlock util.Hash,
+	err error,
+) error {
+	if proposer == nil || proposer.Address().Equal(p.local.Address()) {
+		return err
+	}
+
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return errors.WithStack(ctx.Err())
+	}
+
+	if !errors.Is(err, errFailedToRequestProposalToNode) &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+
+	return ErrProposalSelectionFailed.WithMessage(
+		err,
+		"selected proposer failed for point=%v proposer=%q previous_block=%q",
+		point,
+		proposer.Address(),
+		previousBlock,
+	)
+}
+
+func (*BaseProposalSelector) findNode(nodes []base.Node, addr base.Address) base.Node {
+	for i := range nodes {
+		if nodes[i].Address().Equal(addr) {
+			return nodes[i]
+		}
+	}
+
+	return nil
 }
 
 var errConcurrentRequestProposalFound = util.NewIDError("proposal found")

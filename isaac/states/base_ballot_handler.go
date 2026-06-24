@@ -202,8 +202,13 @@ func (st *baseBallotHandler) makeINITBallot(
 	}
 
 	var pr base.ProposalSignFact
+	var proposalUnavailable bool
+	var proposalErr error
 
 	switch i, err := st.requestProposal(ctx, point, prevBlock, initialWait); {
+	case errors.Is(err, isaac.ErrProposalSelectionFailed):
+		proposalUnavailable = true
+		proposalErr = err
 	case err != nil:
 		return nil, e.Wrap(err)
 	default:
@@ -219,17 +224,26 @@ func (st *baseBallotHandler) makeINITBallot(
 	// NOTE broadcast next init ballot
 	var fact base.INITBallotFact
 
-	switch i, err := st.args.NewINITBallotFactFunc(
-		ctx,
-		point,
-		prevBlock,
-		pr,
-		expelfacts,
-	); {
-	case err != nil:
-		return nil, e.Wrap(err)
+	switch {
+	case proposalUnavailable:
+		if len(expelfacts) > 0 {
+			return nil, e.Wrap(proposalErr)
+		}
+
+		fact = isaac.NewProposalUnavailableINITBallotFact(point, prevBlock)
 	default:
-		fact = i
+		switch i, err := st.args.NewINITBallotFactFunc(
+			ctx,
+			point,
+			prevBlock,
+			pr,
+			expelfacts,
+		); {
+		case err != nil:
+			return nil, e.Wrap(err)
+		default:
+			fact = i
+		}
 	}
 
 	sf := isaac.NewINITBallotSignFact(fact)
@@ -513,6 +527,8 @@ func (st *baseBallotHandler) defaultPrepareNextBlockBallot(
 			switch bl, err := st.makeNextBlockBallot(ctx, avp, suf, wait); {
 			case errors.Is(err, context.Canceled):
 				return nil
+			case errors.Is(err, isaac.ErrProposalSelectionFailed):
+				return nil
 			case err != nil:
 				go st.switchState(newBrokenSwitchContext(StateConsensus, err))
 
@@ -559,6 +575,8 @@ func (st *baseBallotHandler) defaultPrepareNextRoundBallot(
 		func(ctx context.Context) base.INITBallot {
 			switch bl, err := st.makeNextRoundBallot(ctx, vp, previousBlock, suf, wait); {
 			case errors.Is(err, context.Canceled):
+				return nil
+			case errors.Is(err, isaac.ErrProposalSelectionFailed):
 				return nil
 			case err != nil:
 				go st.switchState(newBrokenSwitchContext(StateConsensus, err))

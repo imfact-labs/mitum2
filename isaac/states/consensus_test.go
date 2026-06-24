@@ -55,7 +55,7 @@ func (t *baseTestConsensusHandler) newState(args *ConsensusHandlerArgs) (*Consen
 
 	st.bbt = newBallotBroadcastTimers(timers, func(ctx context.Context, bl base.Ballot) error {
 		return st.broadcastBallot(ctx, bl)
-	}, args.IntervalBroadcastBallot())
+	}, args.IntervalBroadcastBallot, func() int { return 1 })
 	t.NoError(st.bbt.Start(context.Background()))
 
 	return st, func() {
@@ -168,7 +168,7 @@ func (t *testConsensusHandler) TestFailedToFetchProposal() {
 
 	st.bbt = newBallotBroadcastTimers(timers, func(ctx context.Context, bl base.Ballot) error {
 		return st.broadcastBallot(ctx, bl)
-	}, args.IntervalBroadcastBallot())
+	}, args.IntervalBroadcastBallot, func() int { return 1 })
 	t.NoError(st.bbt.Start(context.Background()))
 
 	defer st.bbt.Stop()
@@ -206,6 +206,217 @@ func (t *testConsensusHandler) TestFailedToFetchProposal() {
 			t.Equal(ivp.Point().Point, abl.Point().Point)
 		}
 	})
+}
+
+func (t *testConsensusHandler) TestProposalSelectionFailureWaitsForLaterRound() {
+	point := base.RawPoint(33, 0)
+	suf, nodes := isaac.NewTestSuffrage(2, t.Local)
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	args := t.newargs(previous, suf)
+
+	st, closef := t.newState(args)
+	defer closef()
+
+	st.ctx = context.Background()
+	st.cancel = func() {}
+
+	t.LocalParams.SetWaitPreparingINITBallot(time.Nanosecond)
+
+	ballotch := make(chan base.Ballot, 1)
+	st.ballotBroadcaster = NewDummyBallotBroadcaster(t.Local.Address(), func(bl base.Ballot) error {
+		ballotch <- bl
+
+		return nil
+	})
+
+	brokench := make(chan switchContext, 1)
+	st.switchStateFunc = func(sctx switchContext) error {
+		if sctx.next() == StateBroken {
+			brokench <- sctx
+		}
+
+		return nil
+	}
+
+	localnodes := make([]base.LocalNode, suf.Len())
+	for i := range nodes {
+		localnodes[i] = nodes[i].(base.LocalNode)
+	}
+
+	fact := t.PRPool.GetFact(point)
+	avp, ivp := t.VoteproofsPair(point.PrevHeight(), point, nil, nil, fact.Hash(), localnodes)
+	t.True(st.forceSetLastVoteproof(avp))
+	t.True(st.forceSetLastVoteproof(ivp))
+
+	nextRoundPoint := point.NextRound()
+	laterRoundPoint := nextRoundPoint.NextRound()
+
+	st.args.ProposalSelectFunc = func(ctx context.Context, p base.Point, _ util.Hash, _ time.Duration) (base.ProposalSignFact, error) {
+		switch {
+		case p.Equal(nextRoundPoint):
+			return nil, isaac.ErrProposalSelectionFailed.Errorf("selected proposer unavailable")
+		case p.Equal(laterRoundPoint):
+			return t.PRPool.Get(p), nil
+		default:
+			return nil, util.ErrNotFound.Errorf("unexpected point, %v", p)
+		}
+	}
+
+	prevBlock := st.lastVoteproofs().PreviousBlockForNextRound(ivp)
+
+	t.NoError(st.defaultPrepareNextRoundBallot(ivp, prevBlock, suf, time.Nanosecond))
+
+	var unavailableBallot base.INITBallot
+
+	select {
+	case sctx := <-brokench:
+		t.T().Fatalf("proposal selection failure should not move to broken state: %v", sctx)
+	case bl := <-ballotch:
+		ibl, ok := bl.(base.INITBallot)
+		t.True(ok)
+		unavailableBallot = ibl
+
+		t.Equal(nextRoundPoint, ibl.Point().Point)
+		t.IsType(isaac.ProposalUnavailableINITBallotFact{}, ibl.BallotSignFact().BallotFact())
+		t.NoError(ibl.IsValid(t.LocalParams.NetworkID()))
+	case <-time.After(time.Second * 2):
+		t.Fail("timeout to wait proposal unavailable init ballot")
+	}
+
+	box := NewBallotbox(
+		t.Local.Address(),
+		func() base.Threshold { return t.LocalParams.Threshold() },
+		func(base.Height) (base.Suffrage, bool, error) {
+			return suf, true, nil
+		},
+	)
+	box.SetLastPoint(mustNewLastPoint(ivp.Point(), true, false))
+
+	voted, vps, err := box.voteAndWait(unavailableBallot)
+	t.NoError(err)
+	t.True(voted)
+	t.Nil(vps)
+
+	other := localnodes[1]
+	if other.Address().Equal(t.Local.Address()) {
+		other = localnodes[0]
+	}
+
+	otherFact := isaac.NewProposalUnavailableINITBallotFact(nextRoundPoint, prevBlock)
+	otherSignFact := isaac.NewINITBallotSignFact(otherFact)
+	t.NoError(otherSignFact.NodeSign(other.Privatekey(), t.LocalParams.NetworkID(), other.Address()))
+	otherBallot := isaac.NewINITBallot(ivp, otherSignFact, nil)
+
+	voted, vps, err = box.voteAndWait(otherBallot)
+	t.NoError(err)
+	t.True(voted)
+	t.NotEmpty(vps)
+
+	drawVP := vps[len(vps)-1]
+	t.Equal(base.VoteResultDraw, drawVP.Result())
+	t.Nil(drawVP.Majority())
+	t.Equal(nextRoundPoint, drawVP.Point().Point)
+
+	t.NoError(st.defaultPrepareNextRoundBallot(drawVP, prevBlock, suf, time.Nanosecond))
+
+	select {
+	case sctx := <-brokench:
+		t.T().Fatalf("later round should still be available after proposer failure: %v", sctx)
+	case <-time.After(time.Second * 2):
+		t.Fail("timeout to wait later round init ballot")
+	case bl := <-ballotch:
+		t.Equal(laterRoundPoint, bl.Point().Point)
+		t.IsType(isaac.INITBallotFact{}, bl.(base.INITBallot).BallotSignFact().BallotFact())
+	}
+}
+
+func (t *testConsensusHandler) TestMakeINITBallotProposalUnavailable() {
+	point := base.RawPoint(33, 0)
+	suf, nodes := isaac.NewTestSuffrage(2, t.Local)
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	args := t.newargs(previous, suf)
+
+	st, closef := t.newState(args)
+	defer closef()
+	st.ballotBroadcaster = NewDummyBallotBroadcaster(t.Local.Address(), func(base.Ballot) error {
+		return nil
+	})
+
+	st.args.ProposalSelectFunc = func(context.Context, base.Point, util.Hash, time.Duration) (base.ProposalSignFact, error) {
+		return nil, isaac.ErrProposalSelectionFailed.Errorf("selected proposer unavailable")
+	}
+
+	fact := t.PRPool.GetFact(point)
+	avp, _ := t.VoteproofsPair(point.PrevHeight(), point, nil, nil, fact.Hash(), nodes)
+	prevBlock := avp.BallotMajority().NewBlock()
+
+	bl, err := st.makeINITBallot(context.Background(), point, prevBlock, avp, suf, time.Nanosecond)
+	t.NoError(err)
+	t.NotNil(bl)
+	t.NoError(bl.IsValid(t.LocalParams.NetworkID()))
+	t.IsType(isaac.ProposalUnavailableINITBallotFact{}, bl.BallotSignFact().BallotFact())
+	t.True(bl.BallotSignFact().BallotFact().PreviousBlock().Equal(prevBlock))
+}
+
+func (t *testConsensusHandler) TestMakeINITBallotNormalProposal() {
+	point := base.RawPoint(33, 0)
+	suf, nodes := isaac.NewTestSuffrage(2, t.Local)
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	args := t.newargs(previous, suf)
+
+	st, closef := t.newState(args)
+	defer closef()
+	st.ballotBroadcaster = NewDummyBallotBroadcaster(t.Local.Address(), func(base.Ballot) error {
+		return nil
+	})
+
+	pr := t.PRPool.Get(point)
+	st.args.ProposalSelectFunc = func(context.Context, base.Point, util.Hash, time.Duration) (base.ProposalSignFact, error) {
+		return pr, nil
+	}
+
+	avp, _ := t.VoteproofsPair(point.PrevHeight(), point, nil, nil, pr.Fact().Hash(), nodes)
+	prevBlock := avp.BallotMajority().NewBlock()
+
+	bl, err := st.makeINITBallot(context.Background(), point, prevBlock, avp, suf, time.Nanosecond)
+	t.NoError(err)
+	t.NotNil(bl)
+	t.NoError(bl.IsValid(t.LocalParams.NetworkID()))
+	t.IsType(isaac.INITBallotFact{}, bl.BallotSignFact().BallotFact())
+	t.True(bl.BallotSignFact().BallotFact().Proposal().Equal(pr.Fact().Hash()))
+}
+
+func (t *testConsensusHandler) TestMakeINITBallotProposalUnavailableWithExpel() {
+	point := base.RawPoint(33, 0)
+	suf, nodes := isaac.NewTestSuffrage(2, t.Local)
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	args := t.newargs(previous, suf)
+	args.SuffrageVotingFindFunc = func(context.Context, base.Height, base.Suffrage) ([]base.SuffrageExpelOperation, error) {
+		return t.Expels(point.Height(), []base.Address{nodes[1].Address()}, nodes), nil
+	}
+
+	st, closef := t.newState(args)
+	defer closef()
+	st.ballotBroadcaster = NewDummyBallotBroadcaster(t.Local.Address(), func(base.Ballot) error {
+		return nil
+	})
+
+	st.args.ProposalSelectFunc = func(context.Context, base.Point, util.Hash, time.Duration) (base.ProposalSignFact, error) {
+		return nil, isaac.ErrProposalSelectionFailed.Errorf("selected proposer unavailable")
+	}
+
+	fact := t.PRPool.GetFact(point)
+	avp, _ := t.VoteproofsPair(point.PrevHeight(), point, nil, nil, fact.Hash(), nodes)
+	prevBlock := avp.BallotMajority().NewBlock()
+
+	bl, err := st.makeINITBallot(context.Background(), point, prevBlock, avp, suf, time.Nanosecond)
+	t.Error(err)
+	t.ErrorIs(err, isaac.ErrProposalSelectionFailed)
+	t.Nil(bl)
 }
 
 func (t *testConsensusHandler) TestInvalidVoteproofs() {

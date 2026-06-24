@@ -34,7 +34,12 @@ func (t *testBallotBroadcastTimers) newBallotBroadcaster(
 	timers, err := util.NewSimpleTimers(33, time.Millisecond*33)
 	t.NoError(err)
 
-	return newBallotBroadcastTimers(timers, broadcast, time.Second)
+	return newBallotBroadcastTimers(
+		timers,
+		broadcast,
+		func() time.Duration { return time.Second },
+		func() int { return 1 },
+	)
 }
 
 func (t *testBallotBroadcastTimers) newINITBallot(point base.Point) base.INITBallot {

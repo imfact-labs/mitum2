@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bluele/gcache"
 	"github.com/imfact-labs/mitum2/base"
 	"github.com/imfact-labs/mitum2/util"
 	jsonenc "github.com/imfact-labs/mitum2/util/encoder/json"
 	"github.com/imfact-labs/mitum2/util/valuehash"
-	"github.com/bluele/gcache"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/suite"
 )
@@ -259,7 +259,7 @@ func (t *testBaseProposalSelector) TestFailedToReqeustByContext() {
 		return nodes[i].Address().String() < nodes[j].Address().String()
 	})
 
-	var touched int64
+	var requested []string
 
 	args := t.newargs(nodes)
 
@@ -267,16 +267,12 @@ func (t *testBaseProposalSelector) TestFailedToReqeustByContext() {
 
 	args.ProposerSelectFunc = NewFixedProposerSelector(
 		func(base.Point, []base.Node, util.Hash) (base.Node, error) {
-			if atomic.LoadInt64(&touched) < 1 {
-				atomic.AddInt64(&touched, 1)
-
-				return nodes[2], nil
-			}
-
-			return nodes[1], nil
+			return nodes[2], nil
 		},
 	).Select
 	args.RequestFunc = func(ctx context.Context, point base.Point, proposer base.Node, previousBlock util.Hash) (base.ProposalSignFact, bool, error) {
+		requested = append(requested, proposer.Address().String())
+
 		if proposer.Address().Equal(nodes[2].Address()) {
 			return nil, false, context.Canceled
 		}
@@ -309,16 +305,13 @@ func (t *testBaseProposalSelector) TestFailedToReqeustByContext() {
 	prev := valuehash.RandomSHA512()
 	point := base.RawPoint(66, 11)
 	pr, err := p.Select(context.Background(), point, prev, 0)
-	t.NoError(err)
-	t.NotNil(pr)
-
-	t.NoError(pr.IsValid(t.LocalParams.NetworkID()))
-
-	t.Equal(point, pr.Point())
-
-	t.T().Logf("expected selected proposer: %q, but it's dead", nodes[2].Address())
-	t.T().Logf("selected proposer: %q", pr.ProposalFact().Proposer())
-	t.True(nodes[1].Address().Equal(pr.ProposalFact().Proposer()))
+	t.Error(err)
+	t.Nil(pr)
+	t.ErrorIs(err, ErrProposalSelectionFailed)
+	t.NotEmpty(requested)
+	for i := range requested {
+		t.Equal(nodes[2].Address().String(), requested[i])
+	}
 }
 
 func (t *testBaseProposalSelector) TestAllFailedToReqeust() {
@@ -342,16 +335,14 @@ func (t *testBaseProposalSelector) TestAllFailedToReqeust() {
 		pr, err := p.selectInternal(context.Background(), point, prev, 0)
 		t.Error(err)
 		t.Nil(pr)
-
-		t.ErrorContains(err, "no valid nodes left")
+		t.ErrorIs(err, ErrProposalSelectionFailed)
 	})
 
-	t.Run("Select; local proposer", func() {
+	t.Run("Select; no local fallback", func() {
 		pr, err := p.Select(context.Background(), point, prev, 0)
-		t.NoError(err)
-		t.NotNil(pr)
-
-		t.True(pr.ProposalFact().Proposer().Equal(t.Local.Address()))
+		t.Error(err)
+		t.Nil(pr)
+		t.ErrorIs(err, ErrProposalSelectionFailed)
 	})
 }
 
@@ -416,15 +407,14 @@ func (t *testBaseProposalSelector) TestContextCanceled() {
 		pr, err := p.selectInternal(context.Background(), point, prev, 0)
 		t.Error(err)
 		t.Nil(pr)
-		t.ErrorIs(err, context.DeadlineExceeded)
+		t.ErrorIs(err, ErrProposalSelectionFailed)
 	})
 
-	t.Run("Select; local proposer", func() {
+	t.Run("Select; no local fallback", func() {
 		pr, err := p.Select(context.Background(), point, prev, 0)
-		t.NoError(err)
-		t.NotNil(pr)
-
-		t.True(pr.ProposalFact().Proposer().Equal(t.Local.Address()))
+		t.Error(err)
+		t.Nil(pr)
+		t.ErrorIs(err, ErrProposalSelectionFailed)
 	})
 }
 
@@ -504,7 +494,7 @@ func (t *testBaseProposalSelector) TestMainContextCanceled() {
 		t.ErrorContains(err, "context canceled")
 	})
 
-	t.Run("Select; local proposer", func() {
+	t.Run("Select; main context canceled", func() {
 		done := make(chan struct{}, 1)
 
 		var pr base.ProposalSignFact
@@ -520,11 +510,38 @@ func (t *testBaseProposalSelector) TestMainContextCanceled() {
 
 		<-done
 
-		t.NoError(err)
-		t.NotNil(pr)
-
-		t.True(pr.ProposalFact().Proposer().Equal(t.Local.Address()))
+		t.Nil(pr)
+		t.ErrorIs(err, context.Canceled)
 	})
+}
+
+func (t *testBaseProposalSelector) TestSelectedLocalProposerUsesLocalMaker() {
+	nodes := t.newNodes(2, t.Local)
+
+	args := t.newargs(nodes)
+	p := NewBaseProposalSelector(t.Local, args)
+
+	var requested int64
+
+	args.ProposerSelectFunc = NewFixedProposerSelector(
+		func(base.Point, []base.Node, util.Hash) (base.Node, error) {
+			return t.Local, nil
+		},
+	).Select
+	args.RequestFunc = func(context.Context, base.Point, base.Node, util.Hash) (base.ProposalSignFact, bool, error) {
+		atomic.AddInt64(&requested, 1)
+
+		return nil, false, errors.Errorf("request should not be called for local proposer")
+	}
+
+	prev := valuehash.RandomSHA512()
+	point := base.RawPoint(66, 11)
+
+	pr, err := p.Select(context.Background(), point, prev, time.Second)
+	t.NoError(err)
+	t.NotNil(pr)
+	t.True(t.Local.Address().Equal(pr.ProposalFact().Proposer()))
+	t.Equal(int64(0), atomic.LoadInt64(&requested))
 }
 
 func (t *testBaseProposalSelector) TestFromProposer() {
@@ -592,8 +609,11 @@ func (t *testBaseProposalSelector) TestFromProposer() {
 
 	t.Run("failed from proposer", func() {
 		args := newargs()
+		var requested []string
 
 		args.RequestFunc = func(ctx context.Context, point base.Point, proposer base.Node, previousBlock util.Hash) (base.ProposalSignFact, bool, error) {
+			requested = append(requested, proposer.Address().String())
+
 			if proposer.Address().Equal(selectedproposer.Address()) {
 				return nil, false, errors.Errorf("hihihi")
 			}
@@ -614,20 +634,24 @@ func (t *testBaseProposalSelector) TestFromProposer() {
 		p := NewBaseProposalSelector(t.Local, args)
 
 		pr, err := p.Select(context.Background(), point, prev, time.Second)
-		t.NoError(err)
-		t.NotNil(pr)
-
-		t.T().Logf("proposal proposer: %q", pr.ProposalFact().Proposer())
-
-		t.False(selectedproposer.Address().Equal(pr.ProposalFact().Proposer()))
+		t.Error(err)
+		t.Nil(pr)
+		t.ErrorIs(err, ErrProposalSelectionFailed)
+		t.NotEmpty(requested)
+		for i := range requested {
+			t.Equal(selectedproposer.Address().String(), requested[i])
+		}
 	})
 
 	t.Run("failed from proposer with context.Canceled", func() {
 		args := newargs()
 
 		var requested int64
+		var proposers []string
 
 		args.RequestFunc = func(ctx context.Context, point base.Point, proposer base.Node, previousBlock util.Hash) (base.ProposalSignFact, bool, error) {
+			proposers = append(proposers, proposer.Address().String())
+
 			if n := atomic.LoadInt64(&requested); n < 1 && proposer.Address().Equal(selectedproposer.Address()) {
 				atomic.AddInt64(&requested, 1)
 
@@ -662,6 +686,9 @@ func (t *testBaseProposalSelector) TestFromProposer() {
 		t.T().Logf("proposal proposer: %q", pr.ProposalFact().Proposer())
 
 		t.True(selectedproposer.Address().Equal(pr.ProposalFact().Proposer()))
+		for i := range proposers {
+			t.Equal(selectedproposer.Address().String(), proposers[i])
+		}
 	})
 
 	t.Run("all failed", func() {
@@ -677,12 +704,14 @@ func (t *testBaseProposalSelector) TestFromProposer() {
 			pr, err := p.selectInternal(context.Background(), point, prev, time.Second)
 			t.Error(err)
 			t.Nil(pr)
+			t.ErrorIs(err, ErrProposalSelectionFailed)
 		})
 
-		t.Run("Select; local proposer", func() {
+		t.Run("Select; no local fallback", func() {
 			pr, err := p.Select(context.Background(), point, prev, time.Second)
 			t.Error(err)
 			t.Nil(pr)
+			t.ErrorIs(err, ErrProposalSelectionFailed)
 		})
 	})
 }

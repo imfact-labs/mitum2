@@ -66,7 +66,7 @@ func (t *testSyncingHandler) newState(finishch chan base.Height) (*SyncingHandle
 
 	st.bbt = newBallotBroadcastTimers(timers, func(context.Context, base.Ballot) error {
 		return nil
-	}, time.Second)
+	}, func() time.Duration { return time.Second }, func() int { return 1 })
 
 	return st, func(ignoreerror bool) {
 		deferred, err := st.exit(nil)
