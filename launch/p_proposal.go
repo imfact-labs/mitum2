@@ -346,13 +346,16 @@ func getProposalOperationFromRemoteFunc(pctx context.Context) ( //nolint:gocogni
 	return func(
 		ctx context.Context, proposal base.ProposalSignFact, operationhash util.Hash,
 	) (base.Operation, bool, error) {
-		if syncSourcePool.Len() < 1 {
-			return nil, false, nil
-		}
+		// Try the proposer even when the sync source pool is empty.
+		var proposerErr error
 
 		switch isproposer, op, found, err := getProposalOperationFromRemoteProposerf(ctx, proposal, operationhash); {
 		case err != nil:
-			return nil, false, err
+			if ctx.Err() != nil {
+				return nil, false, errors.WithStack(ctx.Err())
+			}
+
+			proposerErr = err
 		case !isproposer:
 		case !found:
 			// NOTE proposer proposed this operation, but it does not have? weired.
@@ -361,6 +364,11 @@ func getProposalOperationFromRemoteFunc(pctx context.Context) ( //nolint:gocogni
 		}
 
 		proposer := proposal.ProposalFact().Proposer()
+
+		if syncSourcePool.Len() < 1 {
+			return nil, false, proposerErr
+		}
+
 		result := util.EmptyLocked[base.Operation]()
 
 		worker, err := util.NewBaseJobWorker(ctx, int64(syncSourcePool.Len()))
@@ -412,6 +420,14 @@ func getProposalOperationFromRemoteFunc(pctx context.Context) ( //nolint:gocogni
 
 		i, _ := result.Value()
 		if i == nil {
+			if ctx.Err() != nil {
+				return nil, false, errors.WithStack(ctx.Err())
+			}
+
+			if proposerErr != nil {
+				err = proposerErr
+			}
+
 			return nil, false, err
 		}
 
@@ -426,11 +442,13 @@ func getProposalOperationFromRemoteProposerFunc(pctx context.Context) (
 	var params *LocalParams
 	var client isaac.NetworkClient
 	var syncSourcePool *isaac.SyncSourcePool
+	var m *quicmemberlist.Memberlist
 
 	if err := util.LoadFromContextOK(pctx,
 		LocalParamsContextKey, &params,
 		QuicstreamClientContextKey, &client,
 		SyncSourcePoolContextKey, &syncSourcePool,
+		MemberlistContextKey, &m,
 	); err != nil {
 		return nil, err
 	}
@@ -440,26 +458,41 @@ func getProposalOperationFromRemoteProposerFunc(pctx context.Context) (
 	) (bool, base.Operation, bool, error) {
 		proposer := proposal.ProposalFact().Proposer()
 
-		var proposernci isaac.NodeConnInfo
+		var proposerci quicstream.ConnInfo
+		var hasproposerci bool
 
 		syncSourcePool.Actives(func(nci isaac.NodeConnInfo) bool {
 			if !proposer.Equal(nci.Address()) {
 				return true
 			}
 
-			proposernci = nci
+			proposerci = nci.ConnInfo()
+			hasproposerci = true
 
 			return false
 		})
 
-		if proposernci == nil {
+		if !hasproposerci {
+			m.Members(func(member quicmemberlist.Member) bool {
+				if !proposer.Equal(member.Address()) {
+					return true
+				}
+
+				proposerci = member.ConnInfo()
+				hasproposerci = true
+
+				return false
+			})
+		}
+
+		if !hasproposerci {
 			return false, nil, false, nil
 		}
 
 		cctx, cancel := context.WithTimeout(ctx, params.Network.TimeoutRequest())
 		defer cancel()
 
-		switch op, found, err := client.Operation(cctx, proposernci.ConnInfo(), operationhash); {
+		switch op, found, err := client.Operation(cctx, proposerci, operationhash); {
 		case err != nil:
 			return true, nil, false, err
 		case !found:
