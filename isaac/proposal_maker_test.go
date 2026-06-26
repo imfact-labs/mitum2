@@ -2,7 +2,10 @@ package isaac
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/imfact-labs/mitum2/base"
 	"github.com/imfact-labs/mitum2/util"
@@ -174,6 +177,76 @@ func (t *testProposalMaker) TestMake() {
 		t.NoError(err)
 		t.Empty(pr.ProposalFact().Operations())
 	})
+}
+
+// TestConcurrentMakeCreatesSingleProposal verifies the ISSUE-005 guard
+// requirement: keeping selected operations in the candidate queue is safe
+// against duplicate proposal creation because the existing ProposalMaker mutex
+// already serializes Make() for the same point. The first caller builds the
+// proposal and the rest reuse it via ProposalByPoint, so no extra in-flight
+// guard is needed.
+func (t *testProposalMaker) TestConcurrentMakeCreatesSingleProposal() {
+	point := base.RawPoint(33, 3)
+	prev := valuehash.RandomSHA256()
+
+	ops := [][2]util.Hash{
+		{valuehash.RandomSHA256(), valuehash.RandomSHA256()},
+		{valuehash.RandomSHA256(), valuehash.RandomSHA256()},
+	}
+
+	var getOperationsCalled int64
+
+	maker := t.newMaker(
+		func(context.Context, base.Height) ([][2]util.Hash, error) {
+			atomic.AddInt64(&getOperationsCalled, 1)
+
+			// NOTE widen the window between the ProposalByPoint miss and
+			// SetProposal so concurrent callers would collide without the lock.
+			time.Sleep(time.Millisecond * 50)
+
+			return ops, nil
+		},
+		nil,
+	)
+
+	const workers = 8
+
+	var wg sync.WaitGroup
+	results := make([]base.ProposalSignFact, workers)
+	errs := make([]error, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+
+		go func(idx int) {
+			defer wg.Done()
+
+			pr, err := maker.Make(context.Background(), point, prev)
+			results[idx] = pr
+			errs[idx] = err
+		}(i)
+	}
+
+	wg.Wait()
+
+	// NOTE only the first caller builds the proposal; the rest hit
+	// ProposalByPoint, so getOperations runs exactly once.
+	t.Equal(int64(1), atomic.LoadInt64(&getOperationsCalled))
+
+	var facthash util.Hash
+	for i := range results {
+		t.NoError(errs[i])
+		t.NotNil(results[i])
+
+		if facthash == nil {
+			facthash = results[i].Fact().Hash()
+
+			continue
+		}
+
+		t.True(facthash.Equal(results[i].Fact().Hash()),
+			"all concurrent Make() calls must return the same proposal")
+	}
 }
 
 func TestProposalMaker(t *testing.T) {

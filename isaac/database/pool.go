@@ -280,8 +280,14 @@ func (db *TempPool) OperationHashes(
 	}
 
 	ops := make([][2]util.Hash, limit)
-	removeOrdered := make([][]byte, limit)
-	removeOps := make([]util.Hash, limit)
+
+	// NOTE removeOrdered collects corrupt ordered entries; removeOps collects
+	// operations that are no longer proposal candidates(known/in-state/expired/
+	// unsupported). Selected operations are intentionally kept in the ordered
+	// queue so a proposer can re-include them when a proposal fails to become a
+	// block. Both can exceed `limit`, so they grow dynamically.
+	var removeOrdered [][]byte
+	var removeOps []util.Hash
 
 	facts := make(map[string]struct{})
 	defer func() {
@@ -290,14 +296,12 @@ func (db *TempPool) OperationHashes(
 	}()
 
 	var opsindex uint64
-	var removeOrderedIndex, removeOpsIndex uint64
 	if err := pst.Iter(
 		leveldbutil.BytesPrefix(leveldbKeyPrefixNewOperationOrdered[:]),
 		func(k []byte, b []byte) (bool, error) {
 			meta, err := ReadFrameHeaderOperation(b)
 			if err != nil {
-				removeOrdered[removeOrderedIndex] = k
-				removeOrderedIndex++
+				removeOrdered = append(removeOrdered, k)
 
 				return true, nil
 			}
@@ -306,28 +310,25 @@ func (db *TempPool) OperationHashes(
 			case err != nil:
 				return false, err
 			case !ok:
-				removeOps[removeOpsIndex] = meta.Operation()
-				removeOpsIndex++
-
-				if removeOpsIndex == limit {
-					return false, nil
-				}
+				// NOTE excluded by filter(known/in-state/expired/unsupported);
+				// drop from the candidate queue.
+				removeOps = append(removeOps, meta.Operation())
 
 				return true, nil
 			}
 
 			if _, found := facts[meta.Fact().String()]; found {
-
 				return true, nil
-			} else {
-				facts[meta.Fact().String()] = struct{}{}
-				ops[opsindex] = [2]util.Hash{meta.Operation(), meta.Fact()}
-				removeOps[removeOpsIndex] = meta.Operation()
-				removeOpsIndex++
-				opsindex++
 			}
 
-			if removeOpsIndex == limit || opsindex == limit {
+			// NOTE selected operation stays in the ordered queue. It is removed
+			// only after it is processed into a block(known/in-state) or
+			// otherwise excluded by the filter above, not at selection time.
+			facts[meta.Fact().String()] = struct{}{}
+			ops[opsindex] = [2]util.Hash{meta.Operation(), meta.Fact()}
+			opsindex++
+
+			if opsindex == limit {
 				return false, nil
 			}
 
@@ -338,11 +339,11 @@ func (db *TempPool) OperationHashes(
 		return nil, e.Wrap(err)
 	}
 
-	if err := db.removeNewOperationOrdereds(removeOrdered[:removeOrderedIndex]); err != nil {
+	if err := db.removeNewOperationOrdereds(removeOrdered); err != nil {
 		return nil, e.Wrap(err)
 	}
 
-	if err := db.setRemoveNewOperations(ctx, height, removeOps[:removeOpsIndex]); err != nil {
+	if err := db.setRemoveNewOperations(ctx, height, removeOps); err != nil {
 		return nil, e.Wrap(err)
 	}
 

@@ -853,7 +853,8 @@ func (t *testNewOperationPool) TestCleanNewOperations() {
 		pst.pst.Iter(
 			leveldbutil.BytesPrefix(leveldbKeyPrefixRemovedNewOperation[:]),
 			func(_, b []byte) (bool, error) {
-				removed = append(removed, valuehash.NewBytes(b))
+				// NOTE Iter reuses the value buffer; copy before retaining.
+				removed = append(removed, valuehash.NewBytes(bytes.Clone(b)))
 
 				return true, nil
 			},
@@ -1046,6 +1047,121 @@ func (t *testNewOperationPool) TestPeriodicCleanNewOperations() {
 		case removed := <-removedch:
 			t.Equal(len(filtered4), removed)
 		}
+	})
+}
+
+func (t *testNewOperationPool) removedNewOperations(pst *TempPool) []util.Hash {
+	var removed []util.Hash
+
+	t.NoError(pst.pst.Iter(
+		leveldbutil.BytesPrefix(leveldbKeyPrefixRemovedNewOperation[:]),
+		func(_, b []byte) (bool, error) {
+			// NOTE Iter reuses the value buffer; copy before retaining.
+			removed = append(removed, valuehash.NewBytes(bytes.Clone(b)))
+
+			return true, nil
+		},
+		true,
+	))
+
+	return removed
+}
+
+// TestSelectedOperationsRemainCandidates covers ISSUE-005: an operation that is
+// selected into a proposal must stay in the candidate queue until it is actually
+// processed into a block(known/in-state) or otherwise excluded by the filter, so
+// it can be re-proposed when a proposal fails to become a block.
+func (t *testNewOperationPool) TestSelectedOperationsRemainCandidates() {
+	pst := t.NewPool()
+	defer pst.Close()
+
+	ops := make([]base.Operation, 5)
+	for i := range ops {
+		fact := isaac.NewDummyOperationFact(util.UUID().Bytes(), valuehash.RandomSHA256())
+		op, _ := isaac.NewDummyOperation(fact, t.local.Privatekey(), t.networkID)
+		ops[i] = op
+
+		added, err := pst.SetOperation(context.Background(), op)
+		t.NoError(err)
+		t.True(added)
+	}
+
+	height := base.Height(33)
+
+	containsHash := func(hs [][2]util.Hash, h util.Hash) bool {
+		for i := range hs {
+			if hs[i][0].Equal(h) {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	t.Run("selected operations stay in candidate queue", func() {
+		// NOTE first selection: every operation is a candidate.
+		rops, err := pst.OperationHashes(context.Background(), height, uint64(len(ops)), nil)
+		t.NoError(err)
+		t.Equal(len(ops), len(rops))
+
+		// NOTE second selection without committing any block: the same
+		// operations must still be candidates(not removed at selection time).
+		rops, err = pst.OperationHashes(context.Background(), height, uint64(len(ops)), nil)
+		t.NoError(err)
+		t.Equal(len(ops), len(rops))
+		for i := range ops {
+			t.True(containsHash(rops, ops[i].Hash()), "op=%q must remain candidate", ops[i].Hash())
+		}
+
+		// NOTE nothing has been removed yet.
+		t.Empty(t.removedNewOperations(pst))
+	})
+
+	t.Run("processed operations are excluded and removed", func() {
+		// NOTE simulate a committed block: ops[1] and ops[3] became
+		// known/in-state, so the filter excludes them.
+		processed := []util.Hash{ops[1].Hash(), ops[3].Hash()}
+
+		isProcessed := func(h util.Hash) bool {
+			for i := range processed {
+				if processed[i].Equal(h) {
+					return true
+				}
+			}
+
+			return false
+		}
+
+		filter := func(meta isaac.PoolOperationRecordMeta) (bool, error) {
+			return !isProcessed(meta.Operation()), nil
+		}
+
+		rops, err := pst.OperationHashes(context.Background(), height, uint64(len(ops)), filter)
+		t.NoError(err)
+		t.Equal(len(ops)-len(processed), len(rops))
+		for i := range processed {
+			t.False(containsHash(rops, processed[i]))
+		}
+
+		// NOTE only the excluded operations move to removed markers.
+		t.Equal(len(processed), len(t.removedNewOperations(pst)))
+
+		// NOTE their bodies still exist until the cleaner runs.
+		for i := range processed {
+			op, found, err := pst.Operation(context.Background(), processed[i])
+			t.NoError(err)
+			t.True(found)
+			t.NotNil(op)
+		}
+
+		// NOTE next selection drops the processed operations but keeps the
+		// still-unprocessed ones as candidates.
+		rops, err = pst.OperationHashes(context.Background(), height, uint64(len(ops)), nil)
+		t.NoError(err)
+		t.Equal(len(ops)-len(processed), len(rops))
+		t.True(containsHash(rops, ops[0].Hash()))
+		t.True(containsHash(rops, ops[2].Hash()))
+		t.True(containsHash(rops, ops[4].Hash()))
 	})
 }
 
