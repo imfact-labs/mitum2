@@ -186,6 +186,72 @@ func (t *testWriter) TestSetStates() {
 	}
 }
 
+// TestSetOperationsWrittenInIndexOrder covers ISSUE-006: even though operations
+// are processed in parallel, the operations block item must be written in
+// proposal(index) order so it aligns with the operation_receipts item. The test
+// drives SetStates in reverse index order to make call/completion order differ
+// from index order, then asserts the fswriter receives operations in ascending
+// index order.
+func (t *testWriter) TestSetOperationsWrittenInIndexOrder() {
+	point := base.RawPoint(33, 44)
+
+	db := t.NewLeveldbBlockWriteDatabase(point.Height())
+	defer db.DeepClose()
+
+	fswriter := &DummyBlockFSWriter{}
+
+	var writtenIndexes []uint64
+	var writtenOps []util.Hash
+	fswriter.setOperationf = func(_ context.Context, _, index uint64, op base.Operation) error {
+		// NOTE flush is sequential, so no synchronization is needed here.
+		writtenIndexes = append(writtenIndexes, index)
+		writtenOps = append(writtenOps, op.Hash())
+
+		return nil
+	}
+
+	ophs := make([][2]util.Hash, 33)
+	ops := make([]base.Operation, len(ophs))
+	for i := range ops {
+		fact := isaac.NewDummyOperationFact(util.UUID().Bytes(), valuehash.RandomSHA256())
+		op, err := isaac.NewDummyOperation(fact, t.Local.Privatekey(), t.LocalParams.NetworkID())
+		t.NoError(err)
+
+		ops[i] = op
+		ophs[i] = [2]util.Hash{op.Hash(), op.Fact().Hash()}
+	}
+
+	pr := isaac.NewProposalSignFact(isaac.NewProposalFact(point, t.Local.Address(), valuehash.RandomSHA256(), ophs))
+	_ = pr.Sign(t.Local.Privatekey(), t.LocalParams.NetworkID())
+
+	writer := NewWriter(pr, base.NilGetState, db, func(isaac.BlockWriteDatabase) error { return nil }, fswriter, math.MaxInt8)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	writer.SetOperationsSize(uint64(len(ops)))
+
+	// NOTE call in reverse index order so call order differs from index order.
+	for i := len(ops) - 1; i >= 0; i-- {
+		index := uint64(i)
+
+		t.NoError(writer.SetProcessResult(ctx, index, ops[index].Hash(), ops[index].Fact().Hash(), true, nil))
+		t.NoError(writer.SetStates(ctx, index, []base.StateMergeValue{}, ops[index]))
+	}
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	_, err := writer.Manifest(ctx, previous)
+	t.NoError(err)
+
+	t.NoError(writer.waitSaveWorker(context.Background()))
+
+	t.Equal(len(ops), len(writtenIndexes))
+	for i := range writtenIndexes {
+		t.Equal(uint64(i), writtenIndexes[i], "operations must be written in index order")
+		t.True(ops[i].Hash().Equal(writtenOps[i]), "operation at position %d must be ops[%d]", i, i)
+	}
+}
+
 func (t *testWriter) TestSetStatesAndClose() {
 	point := base.RawPoint(33, 44)
 

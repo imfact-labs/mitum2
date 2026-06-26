@@ -41,6 +41,7 @@ type Writer struct {
 	statesMerger  StatesMerger
 	ststree       fixedtree.Tree
 	workersize    int64
+	operations    []base.Operation
 	receipts      []base.OperationReceiptRecord
 	receiptSet    []bool
 	hasReceipts   bool
@@ -101,6 +102,7 @@ func (w *Writer) SetOperationsSize(n uint64) {
 	}
 
 	w.opstreeg = opstreeg
+	w.operations = make([]base.Operation, n)
 	w.receipts = make([]base.OperationReceiptRecord, n)
 	w.receiptSet = make([]bool, n)
 	w.hasReceipts = false
@@ -185,11 +187,22 @@ func (w *Writer) SetStates(
 		return e.Wrap(err)
 	}
 
-	if err := w.saveWorker(true).NewJob(func(ctx context.Context, _ uint64) error {
-		return w.fswriter.SetOperation(ctx, uint64(w.opstreeg.Len()), index, operation)
-	}); err != nil {
-		return e.Wrap(err)
+	// NOTE buffer the operation by its proposal index instead of appending it to
+	// the operations block item now. Processing is parallel, so appending here
+	// would order the operations item by completion order while the
+	// operation_receipts item keeps proposal(index) order, breaking
+	// digest/validator alignment (ISSUE-006). The buffer is flushed in index
+	// order at save time. Distinct indices are written by distinct goroutines,
+	// mirroring SetOperationReceipt.
+	if w.operations == nil {
+		return e.Errorf("operations buffer not initialized; SetOperationsSize first")
 	}
+
+	if index >= uint64(len(w.operations)) {
+		return e.Errorf("operation index out of range")
+	}
+
+	w.operations[index] = operation
 
 	return nil
 }
@@ -438,6 +451,7 @@ func (w *Writer) close() error {
 	w.getStateFunc = nil
 	_ = w.statesMerger.Close()
 	w.ststree = fixedtree.Tree{}
+	w.operations = nil
 	w.receipts = nil
 	w.receiptSet = nil
 	w.hasReceipts = false
@@ -467,6 +481,22 @@ func (w *Writer) waitSaveWorker(ctx context.Context) error {
 
 	if err := w.db.Write(); err != nil {
 		return err
+	}
+
+	// NOTE flush buffered operations to the operations block item in proposal
+	// (index) order, so the operations item aligns with the operation_receipts
+	// item (ISSUE-006). Empty(nil) slots are skipped, which keeps the operation
+	// set identical to the previous behavior. This runs before SetOperationsTree
+	// closes the operations file.
+	for i := range w.operations {
+		op := w.operations[i]
+		if op == nil {
+			continue
+		}
+
+		if err := w.fswriter.SetOperation(ctx, uint64(len(w.operations)), uint64(i), op); err != nil {
+			return err
+		}
 	}
 
 	if w.opstree.Len() > 0 {
