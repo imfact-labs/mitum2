@@ -30,7 +30,7 @@ type BaseProposalSelectorArgs struct {
 	RequestFunc             func(context.Context, base.Point, base.Node, util.Hash) (base.ProposalSignFact, bool, error)
 	TimeoutRequest          func() time.Duration
 	RequestProposalInterval time.Duration
-	MinProposerWait         time.Duration
+	MinProposerWait         func() time.Duration
 }
 
 func NewBaseProposalSelectorArgs() *BaseProposalSelectorArgs {
@@ -42,7 +42,9 @@ func NewBaseProposalSelectorArgs() *BaseProposalSelectorArgs {
 			return nil, false, util.ErrNotImplemented.Errorf("request")
 		},
 		RequestProposalInterval: time.Millisecond * 666, //nolint:gomnd //...
-		MinProposerWait:         DefaultMinProposerWait, //nolint:gomnd //...
+		MinProposerWait: func() time.Duration {
+			return DefaultMinProposerWait
+		},
 		TimeoutRequest: func() time.Duration {
 			return DefaultTimeoutRequest
 		},
@@ -89,8 +91,9 @@ func (p *BaseProposalSelector) selectInternal(
 	defer p.Unlock()
 
 	pwait := wait
-	if pwait < p.args.MinProposerWait {
-		pwait = p.args.MinProposerWait
+	minProposerWait := p.args.MinProposerWait()
+	if pwait < minProposerWait {
+		pwait = minProposerWait
 	}
 
 	wctx, cancel := context.WithTimeout(ctx, pwait)
