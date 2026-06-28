@@ -21,6 +21,7 @@ type NodeInfoLocalJSONMarshaler struct {
 	IsaacParams      *isaac.Params                    `json:"isaac_parameters"` //nolint:tagliatelle //...
 	MemberlistParams *quicmemberlist.MemberlistParams `json:"memberlist_parameters"`
 	MISCParams       *isaac.MISCParams                `json:"misc_parameters"`
+	NetworkParams    json.RawMessage                  `json:"network_parameters,omitempty"`
 	ConnInfo         string                           `json:"conn_info"`
 	StartedAt        localtime.Time                   `json:"started_at"`
 	Version          util.Version                     `json:"version"`
@@ -56,6 +57,7 @@ func (info NodeInfo) JSONMarshaler() NodeInfoJSONMarshaler {
 			IsaacParams:      info.isaacParams,
 			MemberlistParams: info.memberlistParams,
 			MISCParams:       info.miscParams,
+			NetworkParams:    info.networkParams,
 			ConnInfo:         info.connInfo,
 			Version:          info.version,
 			StartedAt:        localtime.New(info.startedAt),
@@ -93,6 +95,7 @@ type nodeInfoLocalJSONUnmarshaler struct {
 	IsaacParams      json.RawMessage `json:"isaac_parameters"` //nolint:tagliatelle //...
 	MemberlistParams json.RawMessage `json:"memberlist_parameters"`
 	MISCParams       json.RawMessage `json:"misc_parameters"`
+	NetworkParams    json.RawMessage `json:"network_parameters,omitempty"`
 	Version          util.Version    `json:"version"`
 }
 
@@ -115,6 +118,8 @@ func (info *NodeInfo) DecodeJSON(b []byte, enc encoder.Encoder) error {
 	if err := enc.Unmarshal(b, &u); err != nil {
 		return e.Wrap(err)
 	}
+
+	info.SetNetworkParams(u.Local.NetworkParams)
 
 	info.networkID = u.NetworkID
 	info.startedAt = u.Local.StartedAt.Time

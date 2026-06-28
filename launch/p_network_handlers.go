@@ -166,7 +166,9 @@ func PNetworkHandlers(pctx context.Context) (context.Context, error) {
 
 	EnsureHandlerAdd(pctx, &gerror,
 		isaacnetwork.HandlerNameNodeInfo,
-		isaacnetwork.QuicstreamHandlerNodeInfo(QuicstreamHandlerGetNodeInfoFunc(encs.Default(), nodeinfo)), nil)
+		isaacnetwork.QuicstreamHandlerNodeInfo(
+			QuicstreamHandlerGetNodeInfoFunc(encs.Default(), nodeinfo, design.LocalParams.Network),
+		), nil)
 
 	EnsureHandlerAdd(pctx, &gerror,
 		isaacnetwork.HandlerNameNodeMetrics,
@@ -425,28 +427,43 @@ func QuicstreamHandlerSuffrageNodeConnInfoFunc(
 func QuicstreamHandlerGetNodeInfoFunc(
 	enc encoder.Encoder,
 	nodeinfo *isaacnetwork.NodeInfoUpdater,
+	networkParams *NetworkParams,
 ) func() ([]byte, error) {
-	lastid := util.EmptyLocked[[2]interface{}]()
+	type cacheValue struct {
+		key  [2]string
+		body []byte
+	}
+
+	last := util.EmptyLocked[cacheValue]()
 
 	return func() ([]byte, error) {
 		var b []byte
+		key := [2]string{nodeinfo.ID(), networkParams.ID()}
 
-		if _, err := lastid.Set(func(v [2]interface{}, isempty bool) (vv [2]interface{}, _ error) {
+		if _, err := last.Set(func(v cacheValue, isempty bool) (vv cacheValue, _ error) {
 			switch {
 			case isempty:
-			case v[0].(string) == nodeinfo.ID(): //nolint:forcetypeassert //...
-				b = v[1].([]byte) //nolint:forcetypeassert //...
+			case v.key == key:
+				b = v.body
 
 				return vv, util.ErrLockedSetIgnore
 			}
 
-			switch i, err := enc.Marshal(nodeinfo.NodeInfo()); {
+			networkParamsJSON, err := networkParams.MarshalJSON()
+			if err != nil {
+				return vv, err
+			}
+
+			ni := nodeinfo.NodeInfo()
+			ni.SetNetworkParams(networkParamsJSON)
+
+			switch i, err := enc.Marshal(ni); {
 			case err != nil:
 				return vv, err
 			default:
 				b = i
 
-				return [2]interface{}{nodeinfo.ID(), i}, nil
+				return cacheValue{key: key, body: i}, nil
 			}
 		}); err != nil {
 			return nil, err

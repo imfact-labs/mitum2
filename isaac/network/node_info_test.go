@@ -1,12 +1,14 @@
 package isaacnetwork
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/imfact-labs/mitum2/base"
 	"github.com/imfact-labs/mitum2/isaac"
 	isaacstates "github.com/imfact-labs/mitum2/isaac/states"
+	"github.com/imfact-labs/mitum2/network/quicmemberlist"
 	"github.com/imfact-labs/mitum2/network/quicstream"
 	"github.com/imfact-labs/mitum2/util"
 	"github.com/imfact-labs/mitum2/util/encoder"
@@ -36,7 +38,9 @@ func TestNodeInfoEncode(tt *testing.T) {
 		{Hint: base.DummyManifestHint, Instance: base.DummyManifest{}},
 		{Hint: isaac.FixedSuffrageCandidateLimiterRuleHint, Instance: isaac.FixedSuffrageCandidateLimiterRule{}},
 		{Hint: isaac.NetworkPolicyHint, Instance: isaac.NetworkPolicy{}},
-		{Hint: isaac.ParamsHint, Instance: isaac.Params{}},
+		{Hint: isaac.ParamsHint, Instance: &isaac.Params{}},
+		{Hint: isaac.MiscParamsHint, Instance: &isaac.MISCParams{}},
+		{Hint: quicmemberlist.ParamsHint, Instance: &quicmemberlist.MemberlistParams{}},
 		{Hint: NodeInfoHint, Instance: NodeInfo{}},
 	}
 	for i := range hints {
@@ -52,6 +56,8 @@ func TestNodeInfoEncode(tt *testing.T) {
 		info.SetSuffrageHeight(base.Height(44))
 		info.SetNetworkPolicy(isaac.DefaultNetworkPolicy())
 		info.SetIsaacParams(isaac.DefaultParams(networkID))
+		info.SetMemberlistParams(quicmemberlist.DefaultMemberlistParams())
+		info.SetMISCParams(isaac.DefaultMISCParams())
 
 		ci, err := quicstream.NewConnInfoFromStringAddr("1.2.3.4:4321", true)
 		t.NoError(err)
@@ -66,6 +72,7 @@ func TestNodeInfoEncode(tt *testing.T) {
 		info.SetLastVote(base.NewStagePoint(base.RawPoint(33, 3), base.StageACCEPT), base.VoteResultMajority)
 
 		n := info.NodeInfo()
+		n.SetNetworkParams(json.RawMessage(`{"timeout_request":"11s"}`))
 
 		b, err := enc.Marshal(n)
 		t.NoError(err)
@@ -110,6 +117,7 @@ func TestNodeInfoEncode(tt *testing.T) {
 		t.Equal(ah.version, bh.version)
 		t.True(util.TimeEqual(ah.startedAt, bh.startedAt))
 		t.Equal(ah.lastVote, bh.lastVote)
+		t.JSONEq(string(ah.NetworkParams()), string(bh.NetworkParams()))
 	}
 
 	suite.Run(tt, t)

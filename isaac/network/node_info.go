@@ -1,6 +1,8 @@
 package isaacnetwork
 
 import (
+	"bytes"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -26,6 +28,7 @@ type NodeInfo struct {
 	isaacParams      *isaac.Params
 	memberlistParams *quicmemberlist.MemberlistParams
 	miscParams       *isaac.MISCParams
+	networkParams    json.RawMessage
 	connInfo         string
 	consensusState   isaacstates.StateType
 	consensusNodes   []base.Node
@@ -102,6 +105,14 @@ func (info NodeInfo) MemberlistParams() *quicmemberlist.MemberlistParams {
 
 func (info NodeInfo) MISCParams() *isaac.MISCParams {
 	return info.miscParams
+}
+
+func (info NodeInfo) NetworkParams() json.RawMessage {
+	return bytes.Clone(info.networkParams)
+}
+
+func (info *NodeInfo) SetNetworkParams(b json.RawMessage) {
+	info.networkParams = bytes.Clone(b)
 }
 
 func (info NodeInfo) ConnInfo() string {
