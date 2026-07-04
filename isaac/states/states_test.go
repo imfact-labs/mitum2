@@ -1105,6 +1105,105 @@ func (t *testStates) TestMimicBallot() {
 	})
 }
 
+func (t *testStates) TestNoSignBeforeExtendedBallotPaths() {
+	local := base.RandomLocalNode()
+	remote := base.RandomLocalNode()
+	networkID := t.params.NetworkID()
+	boundary := base.NewStagePoint(base.RawPoint(33, 4), base.StageINIT)
+	pool := NewDummyBallotPool()
+	broadcasts := make(chan base.Ballot, 1)
+	broadcaster := NewDefaultBallotBroadcaster(local.Address(), pool, func(bl base.Ballot) error {
+		broadcasts <- bl
+		return nil
+	})
+	statesArgs := NewStatesArgs()
+	statesArgs.BallotBroadcaster = broadcaster
+	statesArgs.NoSignBefore = boundary
+	statesArgs.AllowConsensus = true
+	statesArgs.IsInSyncSourcePoolFunc = func(base.Address) bool { return true }
+	st, err := NewStates(networkID, local, statesArgs)
+	t.NoError(err)
+	_ = st.SetLogging(logging.TestNilLogging)
+
+	handlerArgs := newBaseBallotHandlerArgs()
+	handler := newBaseBallotHandlerType(StateConsensus, networkID, local, &handlerArgs)
+	handler.setStates(st)
+
+	newMajorityINIT := func(point base.Point) base.INITVoteproof {
+		fact := isaac.NewINITBallotFact(point, valuehash.RandomSHA256(), valuehash.RandomSHA256(), nil)
+		sf := isaac.NewINITBallotSignFact(fact)
+		t.NoError(sf.NodeSign(local.Privatekey(), networkID, local.Address()))
+		vp := isaac.NewINITVoteproof(point)
+		vp.SetMajority(fact).SetSignFacts([]base.BallotSignFact{sf}).SetThreshold(100).Finish()
+		return vp
+	}
+	t.Run("lower init rejected", func() {
+		point := boundary.Point.PrevRound().PrevRound().PrevRound()
+		bl, err := handler.makeINITBallot(
+			context.Background(), point, valuehash.RandomSHA256(), newMajorityINIT(point), nil, 0,
+		)
+		t.Error(err)
+		t.Nil(bl)
+	})
+	t.Run("exact cached lower init reused", func() {
+		point := boundary.Point.PrevRound().PrevRound().PrevRound().PrevRound()
+		fact := isaac.NewINITBallotFact(point, valuehash.RandomSHA256(), valuehash.RandomSHA256(), nil)
+		sf := isaac.NewINITBallotSignFact(fact)
+		t.NoError(sf.NodeSign(local.Privatekey(), networkID, local.Address()))
+		cached := isaac.NewINITBallot(newMajorityINIT(point), sf, nil)
+		_, err := pool.SetBallot(cached)
+		t.NoError(err)
+		bl, err := handler.makeINITBallot(
+			context.Background(), point, fact.PreviousBlock(), cached.Voteproof(), nil, 0,
+		)
+		t.NoError(err)
+		t.Equal(cached, bl)
+	})
+
+	t.Run("recovered draw promotion accept allowed", func() {
+		ivp := newMajorityINIT(boundary.Point.PrevRound())
+		bl, err := handler.makeACCEPTBallot(ivp, valuehash.RandomSHA256(), nil)
+		t.NoError(err)
+		t.NotNil(bl)
+	})
+	t.Run("non promotion lower accept rejected", func() {
+		ivp := newMajorityINIT(boundary.Point.PrevRound().PrevRound())
+		bl, err := handler.makeACCEPTBallot(ivp, valuehash.RandomSHA256(), nil)
+		t.Error(err)
+		t.Nil(bl)
+	})
+	t.Run("exact cached lower accept reused", func() {
+		ivp := newMajorityINIT(boundary.Point.PrevRound().PrevRound())
+		fact := isaac.NewACCEPTBallotFact(ivp.Point().Point, ivp.BallotMajority().Proposal(), valuehash.RandomSHA256(), nil)
+		sf := isaac.NewACCEPTBallotSignFact(fact)
+		t.NoError(sf.NodeSign(local.Privatekey(), networkID, local.Address()))
+		cached := isaac.NewACCEPTBallot(ivp, sf, nil)
+		_, err := pool.SetBallot(cached)
+		t.NoError(err)
+		bl, err := handler.makeACCEPTBallot(ivp, valuehash.RandomSHA256(), nil)
+		t.NoError(err)
+		t.Equal(cached, bl)
+	})
+	t.Run("lower suffrage confirm rejected", func() {
+		bl, err := handler.makeSuffrageConfirmBallot(newMajorityINIT(boundary.Point.PrevRound().PrevRound()))
+		t.Error(err)
+		t.Nil(bl)
+	})
+	t.Run("lower mimic rejected", func() {
+		st.cs = newDummyStateHandler(StateSyncing)
+		point := boundary.Point.PrevRound().PrevRound()
+		fact := isaac.NewINITBallotFact(point, valuehash.RandomSHA256(), valuehash.RandomSHA256(), nil)
+		sf := isaac.NewINITBallotSignFact(fact)
+		t.NoError(sf.NodeSign(remote.Privatekey(), networkID, remote.Address()))
+		st.mimicBallotFunc()(isaac.NewINITBallot(nil, sf, nil))
+		select {
+		case <-broadcasts:
+			t.Fail("lower mimic ballot was broadcast")
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+}
+
 func (t *testStates) TestNotAllowConsensusForConsensus() {
 	st, _ := t.booted()
 	defer st.Stop()

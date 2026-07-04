@@ -18,25 +18,37 @@ import (
 var (
 	ErrIgnoreSwitchingState = util.NewIDError("switch state, but ignored")
 	errIgnoreNewVoteproof   = util.NewIDError("new voteproof; ignored")
+	errNoSignBefore         = util.NewIDError("new ballot before no-sign boundary")
 )
 
+func (st *States) checkNoSignBefore(point base.StagePoint) error {
+	boundary := st.args.NoSignBefore
+	if boundary.IsZero() || point.Compare(boundary) >= 0 {
+		return nil
+	}
+	return errNoSignBefore.Errorf("point=%v boundary=%v", point, boundary)
+}
+
 type (
-	NewHandoverXBrokerFunc func(context.Context, quicstream.ConnInfo) (*HandoverXBroker, error)
-	NewHandoverYBrokerFunc func(context.Context, quicstream.ConnInfo) (*HandoverYBroker, error)
+	NewHandoverXBrokerFunc       func(context.Context, quicstream.ConnInfo) (*HandoverXBroker, error)
+	NewHandoverYBrokerFunc       func(context.Context, quicstream.ConnInfo) (*HandoverYBroker, error)
+	PersistConsensusProgressFunc func(base.Voteproof, isaac.LastVoteproofs) error
 )
 
 type StatesArgs struct {
-	Ballotbox               *Ballotbox
-	BallotStuckResolver     BallotStuckResolver
-	LastVoteproofsHandler   *isaac.LastVoteproofsHandler
-	IsInSyncSourcePoolFunc  func(base.Address) bool
-	BallotBroadcaster       BallotBroadcaster
-	WhenStateSwitchedFunc   func(StateType)
-	IntervalBroadcastBallot func() time.Duration
-	BroadcastTimerMult      func() int
-	WhenNewVoteproof        func(base.Voteproof)
-	NewHandoverXBroker      NewHandoverXBrokerFunc
-	NewHandoverYBroker      NewHandoverYBrokerFunc
+	Ballotbox                *Ballotbox
+	BallotStuckResolver      BallotStuckResolver
+	LastVoteproofsHandler    *isaac.LastVoteproofsHandler
+	IsInSyncSourcePoolFunc   func(base.Address) bool
+	BallotBroadcaster        BallotBroadcaster
+	WhenStateSwitchedFunc    func(StateType)
+	IntervalBroadcastBallot  func() time.Duration
+	BroadcastTimerMult       func() int
+	WhenNewVoteproof         func(base.Voteproof)
+	PersistConsensusProgress PersistConsensusProgressFunc
+	NoSignBefore             base.StagePoint
+	NewHandoverXBroker       NewHandoverXBrokerFunc
+	NewHandoverYBroker       NewHandoverYBrokerFunc
 	// AllowConsensus decides to enter Consensus states. If false, States enters
 	// Syncing state instead of Consensus state.
 	AllowConsensus bool
@@ -59,7 +71,8 @@ func NewStatesArgs() *StatesArgs {
 		BroadcastTimerMult: func() int {
 			return isaac.DefaultBroadcastTimerMult
 		},
-		WhenNewVoteproof: func(base.Voteproof) {},
+		WhenNewVoteproof:         func(base.Voteproof) {},
+		PersistConsensusProgress: func(base.Voteproof, isaac.LastVoteproofs) error { return nil },
 	}
 }
 
@@ -632,6 +645,10 @@ func (st *States) mimicBallotFunc() func(base.Ballot) {
 		default:
 			_ = st.args.BallotBroadcaster.Broadcast(newbl)
 
+			return
+		}
+		if err := st.checkNoSignBefore(bl.Point()); err != nil {
+			l.Error().Err(err).Interface("ballot", bl).Msg("refuse to sign lower mimic ballot")
 			return
 		}
 

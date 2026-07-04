@@ -20,6 +20,7 @@ type voteproofHandlerArgs struct {
 	WhenNewBlockSaved            func(base.BlockMap)
 	WhenNewBlockConfirmed        func(base.Height)
 	whenNewVoteproof             func(base.Voteproof, isaac.LastVoteproofs) error
+	persistConsensusProgress     PersistConsensusProgressFunc
 	prepareACCEPTBallot          func(base.INITVoteproof, util.Hash, time.Duration, base.ACCEPTBallotFact) error
 	prepareNextRoundBallot       func(base.Voteproof, util.Hash, base.Suffrage, time.Duration) error
 	prepareSuffrageConfirmBallot func(base.Voteproof)
@@ -41,6 +42,7 @@ func newVoteproofHandlerArgs() voteproofHandlerArgs {
 		whenNewVoteproof: func(base.Voteproof, isaac.LastVoteproofs) error {
 			return nil
 		},
+		persistConsensusProgress: func(base.Voteproof, isaac.LastVoteproofs) error { return nil },
 		prepareACCEPTBallot: func(base.INITVoteproof, util.Hash, time.Duration, base.ACCEPTBallotFact) error {
 			return util.ErrNotImplemented.Errorf("prepareACCEPTBallot")
 		},
@@ -92,6 +94,11 @@ func (st *voteproofHandler) new() *voteproofHandler {
 	nst.args.prepareNextBlockBallot = nst.defaultPrepareNextBlockBallot
 
 	return nst
+}
+
+func (st *voteproofHandler) setStates(states *States) {
+	st.baseBallotHandler.setStates(states)
+	st.args.persistConsensusProgress = states.args.PersistConsensusProgress
 }
 
 func (st *voteproofHandler) enter(from StateType, i switchContext) (func(), error) {
@@ -409,11 +416,15 @@ func (st *voteproofHandler) handleNewVoteproof(vp base.Voteproof) error {
 }
 
 func (st *voteproofHandler) newVoteproofWithLVPS(vp base.Voteproof, lvps isaac.LastVoteproofs) error {
+	e := util.StringError("handle new voteproof")
+
+	if err := st.args.persistConsensusProgress(vp, lvps); err != nil {
+		return e.Wrap(err)
+	}
+
 	if st.resolver != nil {
 		st.resolver.Cancel(vp.Point())
 	}
-
-	e := util.StringError("handle new voteproof")
 
 	if err := st.args.whenNewVoteproof(vp, lvps); err != nil {
 		return e.Wrap(err)

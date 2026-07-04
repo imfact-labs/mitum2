@@ -32,6 +32,8 @@ func (t *testPool) SetupSuite() {
 	t.noerror(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.ACCEPTBallotSignFactHint, Instance: isaac.ACCEPTBallotSignFact{}}))
 	t.noerror(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.ACCEPTBallotFactHint, Instance: isaac.ACCEPTBallotFact{}}))
 	t.noerror(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.ACCEPTBallotHint, Instance: isaac.ACCEPTBallot{}}))
+	t.noerror(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.INITVoteproofHint, Instance: isaac.INITVoteproof{}}))
+	t.noerror(t.Enc.Add(encoder.DecodeDetail{Hint: isaac.ACCEPTVoteproofHint, Instance: isaac.ACCEPTVoteproof{}}))
 }
 
 func (t *testPool) SetupTest() {
@@ -44,6 +46,104 @@ func (t *testPool) TestNew() {
 
 	_ = (interface{})(pst).(isaac.ProposalPool)
 	_ = (interface{})(pst).(isaac.NewOperationPool)
+}
+
+func (t *testPool) TestDurableConsensusSnapshot() {
+	pst := t.NewPool()
+	defer pst.Close()
+
+	manifestHash := valuehash.RandomSHA256()
+	acceptFact := t.NewACCEPTBallotFact(base.RawPoint(32, 0), nil, manifestHash)
+	accept, err := t.NewACCEPTVoteproof(acceptFact, t.Local, nil)
+	t.NoError(err)
+	init := isaac.NewINITVoteproof(base.RawPoint(33, 3))
+	init.SetThreshold(t.LocalParams.Threshold()).Finish()
+	snapshot := DurableConsensusSnapshot{
+		Version: DurableConsensusSnapshotVersion, INIT: init, ACCEPT: accept,
+		MajorityAnchor: accept, ManifestHeight: 32, ManifestHash: manifestHash,
+		PreviousBlock: manifestHash, SavedAt: time.Now().UTC(),
+	}
+
+	updated, err := pst.SetDurableConsensusSnapshot(snapshot)
+	t.NoError(err)
+	t.True(updated)
+	recovered, found, err := pst.DurableConsensusSnapshot()
+	t.NoError(err)
+	t.True(found)
+	t.Equal(snapshot.INIT.Point(), recovered.INIT.Point())
+	t.Equal(snapshot.ACCEPT.Point(), recovered.ACCEPT.Point())
+	t.True(snapshot.ManifestHash.Equal(recovered.ManifestHash))
+
+	updated, err = pst.SetDurableConsensusSnapshot(snapshot)
+	t.NoError(err)
+	t.False(updated)
+
+	older := snapshot
+	olderINIT := isaac.NewINITVoteproof(base.RawPoint(33, 2))
+	olderINIT.SetThreshold(t.LocalParams.Threshold()).Finish()
+	older.INIT = olderINIT
+	updated, err = pst.SetDurableConsensusSnapshot(older)
+	t.NoError(err)
+	t.False(updated)
+
+	removed, err := pst.RemoveDurableConsensusSnapshotIfHeight(32)
+	t.NoError(err)
+	t.False(removed)
+	kept, found, err := pst.DurableConsensusSnapshot()
+	t.NoError(err)
+	t.True(found)
+	t.Equal(base.Height(33), kept.Cap().Point().Height())
+	removed, err = pst.RemoveDurableConsensusSnapshotIfHeight(33)
+	t.NoError(err)
+	t.True(removed)
+	_, found, err = pst.DurableConsensusSnapshot()
+	t.NoError(err)
+	t.False(found)
+}
+
+func (t *testPool) TestCorruptDurableConsensusSnapshotFailsRead() {
+	pst := t.NewPool()
+	defer pst.Close()
+	t.NoError(pst.pst.Put(durableConsensusSnapshotKey(), []byte("corrupt"), nil))
+	_, found, err := pst.DurableConsensusSnapshot()
+	t.True(found)
+	t.Error(err)
+}
+
+func (t *testPool) TestConditionalRemoveRejectsEmptySnapshotCap() {
+	pst := t.NewPool()
+	defer pst.Close()
+	_, encoded, err := EncodeFrame(t.Enc, nil, DurableConsensusSnapshot{Version: DurableConsensusSnapshotVersion})
+	t.NoError(err)
+	t.NoError(pst.pst.Put(durableConsensusSnapshotKey(), encoded, nil))
+	removed, err := pst.RemoveDurableConsensusSnapshotIfHeight(33)
+	t.Error(err)
+	t.False(removed)
+}
+
+func (t *testPool) TestHighestBallotPointStopsAfterHighestPointGroup() {
+	pst := t.NewPool()
+	defer pst.Close()
+	high := base.RawPoint(33, 9)
+	initFact := t.NewINITBallotFact(high, nil, nil)
+	initSign := isaac.NewINITBallotSignFact(initFact)
+	t.NoError(initSign.NodeSign(t.Local.Privatekey(), t.LocalParams.NetworkID(), t.Local.Address()))
+	initBallot := isaac.NewINITBallot(nil, initSign, nil)
+	_, err := pst.SetBallot(initBallot)
+	t.NoError(err)
+	acceptFact := t.NewACCEPTBallotFact(high, initFact.Proposal(), nil)
+	acceptSign := isaac.NewACCEPTBallotSignFact(acceptFact)
+	t.NoError(acceptSign.NodeSign(t.Local.Privatekey(), t.LocalParams.NetworkID(), t.Local.Address()))
+	acceptBallot := isaac.NewACCEPTBallot(nil, acceptSign, nil)
+	_, err = pst.SetBallot(acceptBallot)
+	t.NoError(err)
+
+	lower := base.NewStagePoint(base.RawPoint(33, 8), base.StageINIT)
+	t.NoError(pst.pst.Put(leveldbBallotKey(lower, false), []byte("corrupt lower ballot"), nil))
+	got, found, err := pst.HighestBallotPoint()
+	t.NoError(err)
+	t.True(found)
+	t.True(got.Equal(acceptBallot.Point()))
 }
 
 func (t *testPool) TestProposal() {

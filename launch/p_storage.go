@@ -209,6 +209,9 @@ func PLoadFromDatabase(pctx context.Context) (context.Context, error) {
 	var design NodeDesign
 	var encs *encoder.Encoders
 	var center isaac.Database
+	var pool *isaacdatabase.TempPool
+	var log *logging.Logging
+	_ = util.LoadFromContext(pctx, LoggingContextKey, &log)
 	var newReaders func(context.Context, string, *isaac.BlockItemReadersArgs) (*isaac.BlockItemReaders, error)
 	var fromRemotes isaac.RemotesBlockItemReadFunc
 
@@ -216,6 +219,7 @@ func PLoadFromDatabase(pctx context.Context) (context.Context, error) {
 		DesignContextKey, &design,
 		EncodersContextKey, &encs,
 		CenterDatabaseContextKey, &center,
+		PoolDatabaseContextKey, &pool,
 		NewBlockItemReadersFuncContextKey, &newReaders,
 		RemotesBlockItemReaderFuncContextKey, &fromRemotes,
 	); err != nil {
@@ -264,6 +268,8 @@ func PLoadFromDatabase(pctx context.Context) (context.Context, error) {
 		}
 	}
 
+	var committedINIT base.INITVoteproof
+	var committedACCEPT base.ACCEPTVoteproof
 	switch vps, found, err := isaac.BlockItemReadersDecode[[2]base.Voteproof](
 		isaac.BlockItemReadersItemFuncWithRemote(readers, fromRemotes, nil)(context.Background()),
 		bm.Manifest().Height(),
@@ -275,11 +281,77 @@ func PLoadFromDatabase(pctx context.Context) (context.Context, error) {
 	case !found:
 		return nctx, e.Wrap(util.ErrNotFound.Errorf("last voteproofs not found in local fs"))
 	default:
-		lvps.Set(vps[0].(base.INITVoteproof))   //nolint:forcetypeassert //...
-		lvps.Set(vps[1].(base.ACCEPTVoteproof)) //nolint:forcetypeassert //...
+		committedINIT = vps[0].(base.INITVoteproof)     //nolint:forcetypeassert //...
+		committedACCEPT = vps[1].(base.ACCEPTVoteproof) //nolint:forcetypeassert //...
+		if !lvps.Set(committedINIT) || !lvps.Set(committedACCEPT) {
+			return nctx, e.Errorf("committed voteproof pair rejected")
+		}
 	}
 
+	snapshot, found, err := pool.DurableConsensusSnapshot()
+	if err != nil {
+		return nctx, e.Wrap(err)
+	}
+	if !found {
+		boundary := base.NewStagePoint(committedACCEPT.Point().Point.NextHeight(), base.StageINIT)
+		if err := checkDurableConsensusBallotFrontier(pool, boundary); err != nil {
+			return nctx, e.Wrap(err)
+		}
+		return nctx, nil
+	}
+	if err := validateDurableConsensusSnapshot(
+		snapshot, center, design.LocalParams.ISAAC.NetworkID(),
+	); err != nil {
+		return nctx, e.WithMessage(err, "invalid durable consensus snapshot")
+	}
+	committedHeight := bm.Manifest().Height()
+	switch {
+	case snapshot.ManifestHeight == committedHeight && snapshot.ManifestHash.Equal(bm.Manifest().Hash()):
+	case snapshot.Cap().Point().Height() <= committedHeight:
+		anchor, found, err := center.BlockMap(snapshot.ManifestHeight)
+		switch {
+		case err != nil:
+			return nctx, e.WithMessage(err, "load stale snapshot manifest anchor")
+		case !found || anchor == nil || anchor.Manifest() == nil:
+			return nctx, e.Errorf("stale snapshot manifest anchor not found")
+		case !anchor.Manifest().Hash().Equal(snapshot.ManifestHash):
+			return nctx, e.Errorf("stale snapshot manifest anchor conflicts with committed chain")
+		}
+		boundary := base.NewStagePoint(committedACCEPT.Point().Point.NextHeight(), base.StageINIT)
+		if err := checkDurableConsensusBallotFrontier(pool, boundary); err != nil {
+			return nctx, e.Wrap(err)
+		}
+		if _, err := pool.RemoveDurableConsensusSnapshotIfHeight(committedHeight); err != nil && log != nil {
+			log.Log().Warn().Err(err).
+				Interface("snapshot_manifest_height", snapshot.ManifestHeight).
+				Msg("failed to remove valid stale durable consensus snapshot")
+		}
+		return nctx, nil
+	default:
+		return nctx, e.Errorf("durable consensus snapshot conflicts with committed manifest")
+	}
+	noSignBefore, err := recoverDurableConsensusSnapshot(lvps, committedINIT, committedACCEPT, snapshot)
+	if err != nil {
+		return nctx, e.Wrap(err)
+	}
+	if err := checkDurableConsensusBallotFrontier(pool, noSignBefore); err != nil {
+		return nctx, e.Wrap(err)
+	}
+	nctx = context.WithValue(nctx, NoSignBeforeContextKey, noSignBefore)
+
 	return nctx, nil
+}
+
+func checkDurableConsensusBallotFrontier(pool *isaacdatabase.TempPool, boundary base.StagePoint) error {
+	highest, found, err := pool.HighestBallotPoint()
+	switch {
+	case err != nil:
+		return err
+	case !found, highest.Compare(boundary) <= 0:
+		return nil
+	default:
+		return errors.Errorf("signed ballot frontier %v is ahead of recovery boundary %v", highest, boundary)
+	}
 }
 
 func PCleanStorage(pctx context.Context) (context.Context, error) {

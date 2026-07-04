@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/imfact-labs/mitum2/base"
@@ -27,6 +28,7 @@ type TempPool struct {
 	cleanRemovedNewOperationsDeep     int
 	cleanRemovedProposalDeep          int
 	cleanRemovedBallotDeep            int
+	durableConsensusSnapshotLock      sync.Mutex
 }
 
 func NewTempPool(
@@ -799,6 +801,56 @@ func (db *TempPool) SetBallot(bl base.Ballot) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (db *TempPool) HighestBallotPoint() (base.StagePoint, bool, error) {
+	pst, err := db.st()
+	if err != nil {
+		return base.StagePoint{}, false, err
+	}
+	var highest base.StagePoint
+	var highestPoint base.Point
+	var found bool
+	err = pst.Iter(leveldbutil.BytesPrefix(leveldbKeyPrefixBallot[:]), func(key []byte, b []byte) (bool, error) {
+		point, err := pointFromBallotKey(key)
+		if err != nil {
+			return false, err
+		}
+		if found && !point.Equal(highestPoint) {
+			return false, nil
+		}
+		var bl base.Ballot
+		if err := ReadDecodeFrame(db.encs, b, &bl); err != nil {
+			return false, err
+		}
+		switch {
+		case !found:
+			highest, highestPoint, found = bl.Point(), point, true
+		case bl.Point().Compare(highest) > 0:
+			highest = bl.Point()
+		}
+		return true, nil
+	}, false)
+	return highest, found, err
+}
+
+func pointFromBallotKey(key []byte) (base.Point, error) {
+	offset := len(leveldbKeyPrefixBallot)
+	if len(key) < offset+17 {
+		return base.Point{}, errors.Errorf("too short ballot key")
+	}
+	height, err := base.ParseHeightBytes(key[offset : offset+8])
+	if err != nil {
+		return base.Point{}, err
+	}
+	if key[offset+8] != '-' {
+		return base.Point{}, errors.Errorf("invalid ballot point separator")
+	}
+	round, err := util.BytesToUint64(key[offset+9 : offset+17])
+	if err != nil {
+		return base.Point{}, err
+	}
+	return base.NewPoint(height, base.Round(round)), nil
 }
 
 func (db *TempPool) EmptyHeights(f func(base.Height) error) error {

@@ -33,6 +33,7 @@ var (
 	PNameBallotStuckResolver                        = ps.Name("ballot-stuck-resolver")
 	BallotboxContextKey                             = util.ContextKey("ballotbox")
 	StatesContextKey                                = util.ContextKey("states")
+	NoSignBeforeContextKey                          = util.ContextKey("no-sign-before")
 	ProposalProcessorsContextKey                    = util.ContextKey("proposal-processors")
 	ProposerSelectFuncContextKey                    = util.ContextKey("proposer-select-func")
 	ProposalSelectFuncContextKey                    = util.ContextKey("proposal-select-func")
@@ -144,9 +145,11 @@ func PStates(pctx context.Context) (context.Context, error) {
 	var isaacparams *isaac.Params
 	var syncSourcePool *isaac.SyncSourcePool
 	var pool *isaacdatabase.TempPool
+	var center isaac.Database
 	var m *quicmemberlist.Memberlist
 	var nodeinfo *isaacnetwork.NodeInfoUpdater
 	var design NodeDesign
+	var noSignBefore base.StagePoint
 
 	if err := util.LoadFromContextOK(pctx,
 		LoggingContextKey, &log,
@@ -159,6 +162,7 @@ func PStates(pctx context.Context) (context.Context, error) {
 		SyncSourcePoolContextKey, &syncSourcePool,
 		BallotStuckResolverContextKey, &args.BallotStuckResolver,
 		PoolDatabaseContextKey, &pool,
+		CenterDatabaseContextKey, &center,
 		MemberlistContextKey, &m,
 		NodeInfoContextKey, &nodeinfo,
 		DesignContextKey, &design,
@@ -168,6 +172,9 @@ func PStates(pctx context.Context) (context.Context, error) {
 
 	args.IntervalBroadcastBallot = isaacparams.IntervalBroadcastBallot
 	args.AllowConsensus = devflags.AllowConsensus
+	args.PersistConsensusProgress = NewPersistConsensusProgressFunc(log, pool, center)
+	_ = util.LoadFromContext(pctx, NoSignBeforeContextKey, &noSignBefore)
+	args.NoSignBefore = noSignBefore
 	args.BroadcastTimerMult = func() int {
 		return design.LocalParams.Memberlist.BroadcastTimerMult()
 	}
@@ -441,6 +448,7 @@ func newConsensusHandlerArgs(pctx context.Context) (*isaacstates.ConsensusHandle
 	var db isaac.Database
 	var proposalSelectf isaac.ProposalSelectFunc
 	var pps *isaac.ProposalProcessors
+	var pool *isaacdatabase.TempPool
 	var nodeinfo *isaacnetwork.NodeInfoUpdater
 	var nodeInConsensusNodesf func(base.Node, base.Height) (base.Suffrage, bool, error)
 
@@ -451,6 +459,7 @@ func newConsensusHandlerArgs(pctx context.Context) (*isaacstates.ConsensusHandle
 		CenterDatabaseContextKey, &db,
 		ProposalSelectFuncContextKey, &proposalSelectf,
 		ProposalProcessorsContextKey, &pps,
+		PoolDatabaseContextKey, &pool,
 		NodeInfoContextKey, &nodeinfo,
 		NodeInConsensusNodesFuncContextKey, &nodeInConsensusNodesf,
 	); err != nil {
@@ -498,6 +507,11 @@ func newConsensusHandlerArgs(pctx context.Context) (*isaacstates.ConsensusHandle
 	args.ProposalProcessors = pps
 	args.WhenNewBlockSaved = func(bm base.BlockMap) {
 		defaultWhenNewBlockSavedf(bm)
+		if _, err := pool.RemoveDurableConsensusSnapshotIfHeight(bm.Manifest().Height()); err != nil {
+			log.Log().Warn().Err(err).
+				Interface("height", bm.Manifest().Height()).
+				Msg("failed to remove durable consensus snapshot after block save")
+		}
 
 		whenNewBlockSavedf(bm)
 	}

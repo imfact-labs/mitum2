@@ -39,6 +39,7 @@ var (
 	leveldbKeyTempMerged                    = leveldbstorage.KeyPrefix{0x02, 0x10}
 	leveldbKeyPrefixBallot                  = leveldbstorage.KeyPrefix{0x02, 0x11}
 	leveldbKeyPrefixEmptyHeight             = leveldbstorage.KeyPrefix{0x02, 0x12}
+	leveldbKeyDurableConsensusSnapshot      = leveldbstorage.KeyPrefix{0x02, 0x13}
 )
 
 type baseLeveldb struct {
@@ -406,5 +407,6 @@ func AllPrefixKeys() map[leveldbstorage.KeyPrefix]string {
 		leveldbKeySuffrageExpelOperation:        "suffrage_expel_operation",
 		leveldbKeyTempMerged:                    "temp_merged",
 		leveldbKeyPrefixBallot:                  "ballot",
+		leveldbKeyDurableConsensusSnapshot:      "durable_consensus_snapshot",
 	}
 }

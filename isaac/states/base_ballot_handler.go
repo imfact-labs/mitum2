@@ -224,6 +224,12 @@ func (st *baseBallotHandler) makeINITBallot(
 		return bl.(base.INITBallot), nil //nolint:forcetypeassert //...
 	}
 
+	if st.sts != nil {
+		if err := st.sts.checkNoSignBefore(base.NewStagePoint(point, base.StageINIT)); err != nil {
+			return nil, e.Wrap(err)
+		}
+	}
+
 	var pr base.ProposalSignFact
 	var proposalUnavailable bool
 	var proposalErr error
@@ -329,6 +335,12 @@ func (st *baseBallotHandler) makeACCEPTBallot(
 
 		return bl.(base.ACCEPTBallot), nil //nolint:forcetypeassert //...
 	}
+	if st.sts != nil {
+		sp := base.NewStagePoint(ivp.Point().Point, base.StageACCEPT)
+		if err := st.sts.checkNoSignBefore(sp); err != nil && !st.allowRecoveredDRAWPromotionACCEPT(ivp) {
+			return nil, err
+		}
+	}
 
 	var expels []base.SuffrageExpelOperation
 	afact := fact
@@ -378,6 +390,9 @@ func (st *baseBallotHandler) defaultPrepareSuffrageConfirmBallot(vp base.Votepro
 	bl, err := st.makeSuffrageConfirmBallot(vp)
 	if err != nil {
 		l.Error().Err(err).Msg("failed to prepare suffrage confirm ballot")
+		if errors.Is(err, errNoSignBefore) {
+			go st.switchState(newBrokenSwitchContext(st.stt, err))
+		}
 
 		return
 	}
@@ -417,6 +432,11 @@ func (st *baseBallotHandler) makeSuffrageConfirmBallot(vp base.Voteproof) (base.
 
 		return bl.(base.INITBallot), nil //nolint:forcetypeassert //...
 	}
+	if st.sts != nil {
+		if err := st.sts.checkNoSignBefore(base.NewStagePoint(vp.Point().Point, base.StageINIT)); err != nil {
+			return nil, err
+		}
+	}
 
 	ifact := vp.Majority().(isaac.INITBallotFact) //nolint:forcetypeassert //...
 	expelfacts := ifact.ExpelFacts()
@@ -441,6 +461,17 @@ func (st *baseBallotHandler) makeSuffrageConfirmBallot(vp base.Voteproof) (base.
 	bl := isaac.NewINITBallot(vp, sf, nil)
 
 	return bl, nil
+}
+
+func (st *baseBallotHandler) allowRecoveredDRAWPromotionACCEPT(ivp base.INITVoteproof) bool {
+	if st.sts == nil || st.sts.args.NoSignBefore.IsZero() || ivp == nil ||
+		ivp.Result() != base.VoteResultMajority || ivp.Point().Stage() != base.StageINIT {
+		return false
+	}
+	if _, unsupported := ivp.(base.HasExpels); unsupported {
+		return false
+	}
+	return ivp.Point().Point.Equal(st.sts.args.NoSignBefore.Point.PrevRound())
 }
 
 func (st *baseBallotHandler) vote(bl base.Ballot) (bool, error) {
