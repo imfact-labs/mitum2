@@ -21,6 +21,8 @@ type ProposalMaker struct {
 	sync.Mutex
 }
 
+var ErrStaleProposalPoint = util.NewIDError("stale proposal point")
+
 func NewProposalMaker(
 	local base.LocalNode,
 	networkID base.NetworkID,
@@ -67,7 +69,7 @@ func (p *ProposalMaker) PreferEmpty(
 		return nil, e.Wrap(err)
 	case !found:
 	case point.Height() < m.Manifest().Height()-1:
-		return nil, e.Errorf("too old; ignored")
+		return nil, e.Wrap(ErrStaleProposalPoint.Errorf("too old; ignored"))
 	}
 
 	pr, err := p.preferEmpty(ctx, point, previousBlock)
@@ -106,7 +108,7 @@ func (p *ProposalMaker) Make(
 		return nil, e.Wrap(err)
 	case !found:
 	case point.Height() < m.Manifest().Height()-1:
-		return nil, e.Errorf("too old; ignored")
+		return nil, e.Wrap(ErrStaleProposalPoint.Errorf("too old; ignored"))
 	case point.Height() > m.Manifest().Height()+1: // NOTE empty proposal for unreachable point
 		pr, err := p.preferEmpty(context.Background(), point, previousBlock)
 

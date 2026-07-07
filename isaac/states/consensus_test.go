@@ -2,6 +2,7 @@ package isaacstates
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -358,6 +359,141 @@ func (t *testConsensusHandler) TestMakeINITBallotProposalUnavailable() {
 	t.NoError(bl.IsValid(t.LocalParams.NetworkID()))
 	t.IsType(isaac.ProposalUnavailableINITBallotFact{}, bl.BallotSignFact().BallotFact())
 	t.True(bl.BallotSignFact().BallotFact().PreviousBlock().Equal(prevBlock))
+}
+
+func (t *testConsensusHandler) TestPrepareNextBlockBallotStaleProposalPointDiscarded() {
+	point := base.RawPoint(33, 0)
+	suf, nodes := isaac.NewTestSuffrage(2, t.Local)
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	args := t.newargs(previous, suf)
+
+	st, closef := t.newState(args)
+	defer closef()
+	st.ctx = context.Background()
+	st.cancel = func() {}
+
+	ballotch := make(chan base.Ballot, 1)
+	st.ballotBroadcaster = NewDummyBallotBroadcaster(t.Local.Address(), func(bl base.Ballot) error {
+		ballotch <- bl
+
+		return nil
+	})
+
+	switchch := make(chan switchContext, 1)
+	st.switchStateFunc = func(sctx switchContext) error {
+		switchch <- sctx
+
+		return nil
+	}
+
+	st.args.ProposalSelectFunc = func(context.Context, base.Point, util.Hash, time.Duration) (base.ProposalSignFact, error) {
+		return nil, isaac.ErrStaleProposalPoint.Errorf("too old; ignored")
+	}
+
+	fact := t.PRPool.GetFact(point)
+	avp, _ := t.VoteproofsPair(point.PrevHeight(), point, nil, nil, fact.Hash(), nodes)
+
+	t.NoError(st.defaultPrepareNextBlockBallot(avp, suf, time.Nanosecond))
+
+	select {
+	case bl := <-ballotch:
+		t.T().Fatalf("stale next-block task should not broadcast ballot: %v", bl)
+	case sctx := <-switchch:
+		t.T().Fatalf("stale next-block task should not switch state: %v", sctx)
+	case <-time.After(time.Millisecond * 100):
+	}
+}
+
+func (t *testConsensusHandler) TestPrepareNextBlockBallotGeneralProposalErrorBroken() {
+	point := base.RawPoint(33, 0)
+	suf, nodes := isaac.NewTestSuffrage(2, t.Local)
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	args := t.newargs(previous, suf)
+
+	st, closef := t.newState(args)
+	defer closef()
+	st.ctx = context.Background()
+	st.cancel = func() {}
+
+	st.ballotBroadcaster = NewDummyBallotBroadcaster(t.Local.Address(), func(base.Ballot) error {
+		return nil
+	})
+
+	switchch := make(chan switchContext, 1)
+	st.switchStateFunc = func(sctx switchContext) error {
+		switchch <- sctx
+
+		return nil
+	}
+
+	st.args.ProposalSelectFunc = func(context.Context, base.Point, util.Hash, time.Duration) (base.ProposalSignFact, error) {
+		return nil, errors.Errorf("select proposal failed")
+	}
+
+	fact := t.PRPool.GetFact(point)
+	avp, _ := t.VoteproofsPair(point.PrevHeight(), point, nil, nil, fact.Hash(), nodes)
+
+	t.NoError(st.defaultPrepareNextBlockBallot(avp, suf, time.Nanosecond))
+
+	select {
+	case sctx := <-switchch:
+		t.Equal(StateBroken, sctx.next())
+	case <-time.After(time.Second * 2):
+		t.Fail("timeout to wait broken switch")
+	}
+}
+
+func (t *testConsensusHandler) TestPrepareNextBlockBallotStalePrecheckSkipsProposalSelect() {
+	point := base.RawPoint(33, 0)
+	suf, nodes := isaac.NewTestSuffrage(2, t.Local)
+
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	args := t.newargs(previous, suf)
+
+	var proposalSelects atomic.Int64
+	args.ProposalSelectFunc = func(context.Context, base.Point, util.Hash, time.Duration) (base.ProposalSignFact, error) {
+		proposalSelects.Add(1)
+
+		return t.PRPool.Get(point), nil
+	}
+	args.LastManifestForBallotFunc = func() (base.Manifest, bool, error) {
+		return base.NewDummyManifest(point.Height()+2, valuehash.RandomSHA256()), true, nil
+	}
+
+	st, closef := t.newState(args)
+	defer closef()
+	st.ctx = context.Background()
+	st.cancel = func() {}
+
+	ballotch := make(chan base.Ballot, 1)
+	st.ballotBroadcaster = NewDummyBallotBroadcaster(t.Local.Address(), func(bl base.Ballot) error {
+		ballotch <- bl
+
+		return nil
+	})
+
+	switchch := make(chan switchContext, 1)
+	st.switchStateFunc = func(sctx switchContext) error {
+		switchch <- sctx
+
+		return nil
+	}
+
+	fact := t.PRPool.GetFact(point)
+	avp, _ := t.VoteproofsPair(point.PrevHeight(), point, nil, nil, fact.Hash(), nodes)
+
+	t.NoError(st.defaultPrepareNextBlockBallot(avp, suf, time.Nanosecond))
+	t.Equal(int64(0), proposalSelects.Load())
+
+	select {
+	case bl := <-ballotch:
+		t.T().Fatalf("stale pre-check should not broadcast ballot: %v", bl)
+	case sctx := <-switchch:
+		t.T().Fatalf("stale pre-check should not switch state: %v", sctx)
+	case <-time.After(time.Millisecond * 100):
+	}
 }
 
 func (t *testConsensusHandler) TestMakeINITBallotNormalProposal() {

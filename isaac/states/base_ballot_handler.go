@@ -9,12 +9,14 @@ import (
 	"github.com/imfact-labs/mitum2/storage"
 	"github.com/imfact-labs/mitum2/util"
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
 )
 
 type SuffrageVotingFindFunc func(context.Context, base.Height, base.Suffrage) ([]base.SuffrageExpelOperation, error)
 
 type baseBallotHandlerArgs struct {
 	ProposalSelectFunc         isaac.ProposalSelectFunc
+	LastManifestForBallotFunc  func() (base.Manifest, bool, error)
 	NodeInConsensusNodesFunc   isaac.NodeInConsensusNodesFunc
 	VoteFunc                   func(base.Ballot) (bool, error)
 	SuffrageVotingFindFunc     SuffrageVotingFindFunc
@@ -34,6 +36,9 @@ type baseBallotHandlerArgs struct {
 
 func newBaseBallotHandlerArgs() baseBallotHandlerArgs {
 	return baseBallotHandlerArgs{
+		LastManifestForBallotFunc: func() (base.Manifest, bool, error) {
+			return nil, false, nil
+		},
 		NodeInConsensusNodesFunc: func(base.Node, base.Height) (base.Suffrage, bool, error) {
 			return nil, false, util.ErrNotImplemented.Errorf("NodeInConsensusNodesFunc")
 		},
@@ -154,6 +159,8 @@ func (st *baseBallotHandler) makeNextBlockBallot(
 	suf base.Suffrage,
 	initialWait time.Duration,
 ) (base.INITBallot, error) {
+	point := avp.Point().Point.NextHeight()
+
 	if wait := st.args.MinWaitNextBlockINITBallot(); wait < st.args.WaitPreparingINITBallot() {
 		st.Log().Debug().Dur("wait", wait).Msg("wait for next block init balllot")
 
@@ -165,9 +172,16 @@ func (st *baseBallotHandler) makeNextBlockBallot(
 		}
 	}
 
+	switch stale, err := st.isStaleProposalPoint(point); {
+	case err != nil:
+		return nil, err
+	case stale:
+		return nil, errStaleNextBlockTask(point)
+	}
+
 	bl, err := st.makeINITBallot(
 		ctx,
-		avp.Point().Point.NextHeight(),
+		point,
 		avp.BallotMajority().NewBlock(),
 		avp,
 		suf,
@@ -522,10 +536,23 @@ func (st *baseBallotHandler) defaultPrepareNextBlockBallot(
 
 	l := st.Log().With().Str("voteproof", avp.ID()).Object("point", point).Logger()
 
+	switch stale, err := st.isStaleProposalPoint(point); {
+	case err != nil:
+		return err
+	case stale:
+		st.logStaleNextBlockTask(l, point, avp)
+
+		return nil
+	}
+
 	if err := st.prepareINITBallot(
 		func(ctx context.Context) base.INITBallot {
 			switch bl, err := st.makeNextBlockBallot(ctx, avp, suf, wait); {
 			case errors.Is(err, context.Canceled):
+				return nil
+			case errors.Is(err, isaac.ErrStaleProposalPoint):
+				st.logStaleNextBlockTask(l, point, avp)
+
 				return nil
 			case errors.Is(err, isaac.ErrProposalSelectionFailed):
 				return nil
@@ -559,6 +586,33 @@ func (st *baseBallotHandler) defaultPrepareNextBlockBallot(
 	}
 
 	return nil
+}
+
+func (st *baseBallotHandler) isStaleProposalPoint(point base.Point) (bool, error) {
+	switch m, found, err := st.args.LastManifestForBallotFunc(); {
+	case err != nil:
+		return false, err
+	case !found:
+		return false, nil
+	default:
+		return point.Height() < m.Height()-1, nil
+	}
+}
+
+func errStaleNextBlockTask(point base.Point) error {
+	return isaac.ErrStaleProposalPoint.Errorf("stale next-block task, point=%v", point)
+}
+
+func (st *baseBallotHandler) logStaleNextBlockTask(l zerolog.Logger, point base.Point, avp base.ACCEPTVoteproof) {
+	e := l.Debug()
+
+	if m, found, err := st.args.LastManifestForBallotFunc(); err != nil {
+		e.Err(err)
+	} else if found {
+		e.Int64("manifest_height", int64(m.Height())).Stringer("manifest_hash", m.Hash())
+	}
+
+	e.Str("voteproof", avp.ID()).Object("point", point).Msg("stale next-block task discarded")
 }
 
 func (st *baseBallotHandler) defaultPrepareNextRoundBallot(

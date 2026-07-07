@@ -317,6 +317,7 @@ func PStatesSetHandlers(pctx context.Context) (context.Context, error) { //reviv
 	consensusargs.VoteFunc = votef
 	consensusargs.SuffrageVotingFindFunc = suffrageVotingFindf
 	consensusargs.GetManifestFunc = getManifestf
+	consensusargs.LastManifestForBallotFunc = getLastManifestf
 
 	joiningargs, err := newJoiningHandlerArgs(pctx)
 	if err != nil {
@@ -326,6 +327,7 @@ func PStatesSetHandlers(pctx context.Context) (context.Context, error) { //reviv
 	joiningargs.VoteFunc = votef
 	joiningargs.SuffrageVotingFindFunc = suffrageVotingFindf
 	joiningargs.LastManifestFunc = getLastManifestf
+	joiningargs.LastManifestForBallotFunc = getLastManifestf
 
 	handoverargs, err := handoverHandlerArgs(pctx)
 	if err != nil {

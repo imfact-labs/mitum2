@@ -72,6 +72,7 @@ func (t *testProposalMaker) TestPreferEmpty() {
 
 		_, err := maker.PreferEmpty(context.Background(), point.PrevHeight().PrevHeight(), valuehash.RandomSHA256())
 		t.Error(err)
+		t.ErrorIs(err, ErrStaleProposalPoint)
 		t.ErrorContains(err, "too old")
 	})
 
@@ -139,6 +140,7 @@ func (t *testProposalMaker) TestMake() {
 
 		_, err := maker.Make(context.Background(), point.PrevHeight().PrevHeight(), valuehash.RandomSHA256())
 		t.Error(err)
+		t.ErrorIs(err, ErrStaleProposalPoint)
 		t.ErrorContains(err, "too old")
 	})
 
