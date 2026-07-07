@@ -546,6 +546,148 @@ func (t *testBaseProposalSelector) TestSelectedLocalProposerUsesLocalMaker() {
 	t.Equal(int64(0), atomic.LoadInt64(&requested))
 }
 
+func (t *testBaseProposalSelector) TestRemoteRequestWaitBudgetTimeoutIsProposalSelectionFailed() {
+	nodes := t.newNodes(2)
+	args := t.newargs(nodes)
+	args.MinProposerWait = func() time.Duration { return time.Millisecond * 20 }
+	args.TimeoutRequest = func() time.Duration { return time.Second }
+
+	remote := nodes[1]
+	args.ProposerSelectFunc = NewFixedProposerSelector(
+		func(base.Point, []base.Node, util.Hash) (base.Node, error) {
+			return remote, nil
+		},
+	).Select
+	args.RequestFunc = func(ctx context.Context, _ base.Point, _ base.Node, _ util.Hash) (base.ProposalSignFact, bool, error) {
+		<-ctx.Done()
+
+		return nil, false, ctx.Err()
+	}
+
+	p := NewBaseProposalSelector(t.Local, args)
+
+	pr, err := p.Select(context.Background(), base.RawPoint(66, 11), valuehash.RandomSHA512(), time.Millisecond*20)
+	t.Nil(pr)
+	t.ErrorIs(err, ErrProposalSelectionFailed)
+}
+
+func (t *testBaseProposalSelector) TestLocalProposerWaitBudgetTimeoutIsProposalSelectionFailed() {
+	nodes := t.newNodes(2, t.Local)
+	args := t.newargs(nodes)
+	args.MinProposerWait = func() time.Duration { return time.Millisecond * 20 }
+	args.Maker = NewProposalMaker(
+		t.Local,
+		t.LocalParams.NetworkID(),
+		func(ctx context.Context, _ base.Height) ([][2]util.Hash, error) {
+			<-ctx.Done()
+
+			return nil, ctx.Err()
+		},
+		args.Pool,
+		nil,
+	)
+	args.ProposerSelectFunc = NewFixedProposerSelector(
+		func(base.Point, []base.Node, util.Hash) (base.Node, error) {
+			return t.Local, nil
+		},
+	).Select
+
+	p := NewBaseProposalSelector(t.Local, args)
+
+	pr, err := p.Select(context.Background(), base.RawPoint(66, 11), valuehash.RandomSHA512(), time.Millisecond*20)
+	t.Nil(pr)
+	t.ErrorIs(err, ErrProposalSelectionFailed)
+}
+
+func (t *testBaseProposalSelector) TestParentContextCanceledIsNotProposalSelectionFailed() {
+	nodes := t.newNodes(2)
+	args := t.newargs(nodes)
+	args.MinProposerWait = func() time.Duration { return time.Second }
+	args.TimeoutRequest = func() time.Duration { return time.Second }
+
+	remote := nodes[1]
+	args.ProposerSelectFunc = NewFixedProposerSelector(
+		func(base.Point, []base.Node, util.Hash) (base.Node, error) {
+			return remote, nil
+		},
+	).Select
+	args.RequestFunc = func(ctx context.Context, _ base.Point, _ base.Node, _ util.Hash) (base.ProposalSignFact, bool, error) {
+		<-ctx.Done()
+
+		return nil, false, ctx.Err()
+	}
+
+	p := NewBaseProposalSelector(t.Local, args)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		pr, err := p.Select(ctx, base.RawPoint(66, 11), valuehash.RandomSHA512(), time.Second)
+		t.Nil(pr)
+		done <- err
+	}()
+
+	time.Sleep(time.Millisecond * 20)
+	cancel()
+
+	err := <-done
+	t.ErrorIs(err, context.Canceled)
+	t.NotErrorIs(err, ErrProposalSelectionFailed)
+}
+
+func (t *testBaseProposalSelector) TestLocalProposerNonContextErrorIsFatal() {
+	nodes := t.newNodes(2, t.Local)
+	args := t.newargs(nodes)
+	expected := errors.Errorf("local maker failed")
+	args.Maker = NewProposalMaker(
+		t.Local,
+		t.LocalParams.NetworkID(),
+		func(_ context.Context, _ base.Height) ([][2]util.Hash, error) {
+			return nil, expected
+		},
+		args.Pool,
+		nil,
+	)
+	args.ProposerSelectFunc = NewFixedProposerSelector(
+		func(base.Point, []base.Node, util.Hash) (base.Node, error) {
+			return t.Local, nil
+		},
+	).Select
+
+	p := NewBaseProposalSelector(t.Local, args)
+
+	pr, err := p.Select(context.Background(), base.RawPoint(66, 11), valuehash.RandomSHA512(), time.Second)
+	t.Nil(pr)
+	t.ErrorIs(err, expected)
+	t.NotErrorIs(err, ErrProposalSelectionFailed)
+}
+
+func (t *testBaseProposalSelector) TestLocalProposerStaleProposalPointIsPreserved() {
+	nodes := t.newNodes(2, t.Local)
+	args := t.newargs(nodes)
+	args.Maker = NewProposalMaker(
+		t.Local,
+		t.LocalParams.NetworkID(),
+		func(_ context.Context, _ base.Height) ([][2]util.Hash, error) {
+			return nil, ErrStaleProposalPoint.Errorf("too old; ignored")
+		},
+		args.Pool,
+		nil,
+	)
+	args.ProposerSelectFunc = NewFixedProposerSelector(
+		func(base.Point, []base.Node, util.Hash) (base.Node, error) {
+			return t.Local, nil
+		},
+	).Select
+
+	p := NewBaseProposalSelector(t.Local, args)
+
+	pr, err := p.Select(context.Background(), base.RawPoint(66, 11), valuehash.RandomSHA512(), time.Second)
+	t.Nil(pr)
+	t.ErrorIs(err, ErrStaleProposalPoint)
+	t.NotErrorIs(err, ErrProposalSelectionFailed)
+}
+
 func (t *testBaseProposalSelector) TestFromProposer() {
 	nodes := t.newNodes(2, t.Local)
 	prev := valuehash.RandomSHA512()

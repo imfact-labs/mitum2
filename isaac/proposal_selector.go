@@ -111,7 +111,7 @@ func (p *BaseProposalSelector) selectInternal(
 	case len(i) < 2:
 		pr, err := p.proposalFromNode(wctx, point, i[0], previousBlock)
 		if err != nil {
-			return nil, p.handleProposalRequestFailure(ctx, point, i[0], previousBlock, err)
+			return nil, p.handleProposalRequestFailure(ctx, wctx, point, i[0], previousBlock, err)
 		}
 
 		return pr, nil
@@ -123,7 +123,7 @@ func (p *BaseProposalSelector) selectInternal(
 	case errors.Is(err, errFailedToRequestProposalToNode),
 		errors.Is(err, context.Canceled),
 		errors.Is(err, context.DeadlineExceeded):
-		return nil, p.handleProposalRequestFailure(ctx, point, p.findNode(nodes, proposer), previousBlock, err)
+		return nil, p.handleProposalRequestFailure(ctx, wctx, point, p.findNode(nodes, proposer), previousBlock, err)
 	case err != nil:
 		return nil, err
 	case pr != nil:
@@ -288,22 +288,35 @@ func (*BaseProposalSelector) getNodes(
 
 func (p *BaseProposalSelector) handleProposalRequestFailure(
 	ctx context.Context,
+	wctx context.Context,
 	point base.Point,
 	proposer base.Node,
 	previousBlock util.Hash,
 	err error,
 ) error {
+	if errors.Is(err, ErrStaleProposalPoint) {
+		return err
+	}
+
+	if ctx.Err() != nil && isContextError(err) {
+		return errors.WithStack(ctx.Err())
+	}
+
+	if ctx.Err() == nil && wctx.Err() != nil && isContextError(err) {
+		return ErrProposalSelectionFailed.WithMessage(
+			err,
+			"selected proposer wait budget expired for point=%v proposer=%q previous_block=%q",
+			point,
+			proposerAddressString(proposer),
+			previousBlock,
+		)
+	}
+
 	if proposer == nil || proposer.Address().Equal(p.local.Address()) {
 		return err
 	}
 
-	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-		return errors.WithStack(ctx.Err())
-	}
-
-	if !errors.Is(err, errFailedToRequestProposalToNode) &&
-		!errors.Is(err, context.Canceled) &&
-		!errors.Is(err, context.DeadlineExceeded) {
+	if !errors.Is(err, errFailedToRequestProposalToNode) && !isContextError(err) {
 		return err
 	}
 
@@ -314,6 +327,18 @@ func (p *BaseProposalSelector) handleProposalRequestFailure(
 		proposer.Address(),
 		previousBlock,
 	)
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func proposerAddressString(proposer base.Node) string {
+	if proposer == nil {
+		return "<nil>"
+	}
+
+	return proposer.Address().String()
 }
 
 func (*BaseProposalSelector) findNode(nodes []base.Node, addr base.Address) base.Node {
