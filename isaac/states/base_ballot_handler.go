@@ -138,9 +138,18 @@ func (st *baseBallotHandler) makeNextRoundBallot(
 	suf base.Suffrage,
 	initialWait time.Duration,
 ) (base.INITBallot, error) {
+	point := vp.Point().Point.NextRound()
+
+	switch stale, err := st.isStaleProposalPoint(point); {
+	case err != nil:
+		return nil, err
+	case stale:
+		return nil, errStaleNextRoundTask(point)
+	}
+
 	bl, err := st.makeINITBallot(
 		ctx,
-		vp.Point().Point.NextRound(),
+		point,
 		prevBlock,
 		vp,
 		suf,
@@ -603,6 +612,10 @@ func errStaleNextBlockTask(point base.Point) error {
 	return isaac.ErrStaleProposalPoint.Errorf("stale next-block task, point=%v", point)
 }
 
+func errStaleNextRoundTask(point base.Point) error {
+	return isaac.ErrStaleProposalPoint.Errorf("stale next-round task, point=%v", point)
+}
+
 func (st *baseBallotHandler) logStaleNextBlockTask(l zerolog.Logger, point base.Point, avp base.ACCEPTVoteproof) {
 	e := l.Debug()
 
@@ -615,6 +628,18 @@ func (st *baseBallotHandler) logStaleNextBlockTask(l zerolog.Logger, point base.
 	e.Str("voteproof", avp.ID()).Object("point", point).Msg("stale next-block task discarded")
 }
 
+func (st *baseBallotHandler) logStaleNextRoundTask(l zerolog.Logger, point base.Point, vp base.Voteproof) {
+	e := l.Debug()
+
+	if m, found, err := st.args.LastManifestForBallotFunc(); err != nil {
+		e.Err(err)
+	} else if found {
+		e.Int64("manifest_height", int64(m.Height())).Stringer("manifest_hash", m.Hash())
+	}
+
+	e.Str("voteproof", vp.ID()).Object("point", point).Msg("stale next-round task discarded")
+}
+
 func (st *baseBallotHandler) defaultPrepareNextRoundBallot(
 	vp base.Voteproof,
 	previousBlock util.Hash,
@@ -625,10 +650,25 @@ func (st *baseBallotHandler) defaultPrepareNextRoundBallot(
 
 	l := st.Log().With().Str("voteproof", vp.ID()).Object("point", point).Logger()
 
+	switch stale, err := st.isStaleProposalPoint(point); {
+	case err != nil:
+		go st.switchState(newBrokenSwitchContext(StateConsensus, err))
+
+		return nil
+	case stale:
+		st.logStaleNextRoundTask(l, point, vp)
+
+		return nil
+	}
+
 	if err := st.prepareINITBallot(
 		func(ctx context.Context) base.INITBallot {
 			switch bl, err := st.makeNextRoundBallot(ctx, vp, previousBlock, suf, wait); {
 			case errors.Is(err, context.Canceled):
+				return nil
+			case errors.Is(err, isaac.ErrStaleProposalPoint):
+				st.logStaleNextRoundTask(l, point, vp)
+
 				return nil
 			case errors.Is(err, isaac.ErrProposalSelectionFailed):
 				return nil
