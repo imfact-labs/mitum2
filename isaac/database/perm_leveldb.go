@@ -319,6 +319,64 @@ func (db *LeveldbPermanent) BlockMapBytes(height base.Height) (
 	}
 }
 
+func (db *LeveldbPermanent) RepairBlockMapFrontier(height base.Height) ([]base.Height, error) {
+	e := util.StringError("repair blockmap frontier")
+
+	if err := height.IsValid(nil); err != nil {
+		return nil, e.Wrap(err)
+	}
+
+	pst, err := db.st()
+	if err != nil {
+		return nil, e.Wrap(err)
+	}
+
+	var heights []base.Height
+	var keys [][]byte
+
+	if err := pst.Iter(
+		leveldbutil.BytesPrefix(leveldbKeyPrefixBlockMap[:]),
+		func(k, _ []byte) (bool, error) {
+			h, err := heightFromKey(k, leveldbKeyPrefixBlockMap)
+			if err != nil {
+				return false, err
+			}
+
+			if h > height {
+				heights = append(heights, h)
+				keys = append(keys, append([]byte(nil), k...))
+			}
+
+			return true, nil
+		},
+		true,
+	); err != nil {
+		return nil, e.Wrap(err)
+	}
+
+	if len(keys) < 1 {
+		return heights, nil
+	}
+
+	batch := pst.NewBatch()
+	for i := range keys {
+		batch.Delete(keys[i])
+	}
+
+	if err := pst.Batch(batch, nil); err != nil {
+		return nil, e.Wrap(err)
+	}
+
+	_ = db.lenc.EmptyValue()
+	_ = db.mp.EmptyValue()
+
+	if err := db.loadLastBlockMap(); err != nil {
+		return nil, e.Wrap(err)
+	}
+
+	return heights, nil
+}
+
 func (db *LeveldbPermanent) MergeTempDatabase(ctx context.Context, temp isaac.TempDatabase) error {
 	db.Lock()
 	defer db.Unlock()
