@@ -722,6 +722,8 @@ func newSyncerArgsFunc(pctx context.Context) (func(base.Height) (isaacstates.Syn
 		args.LastBlockMapTimeout = params.Network.TimeoutRequest()
 		args.LastBlockMapInterval = isaacparams.SyncerLastBlockMapInterval()
 		args.BlockMapFunc = syncerBlockMapFunc(log, client, params, syncSourcePool, conninfocache, devflags.DelaySyncer)
+		args.LocalLastBlockMapFunc = db.LastBlockMap
+		args.LocalBlockMapFunc = db.BlockMap
 		args.TempSyncPool = tempsyncpool
 		args.WhenStoppedFunc = func() error {
 			conninfocache.Close()

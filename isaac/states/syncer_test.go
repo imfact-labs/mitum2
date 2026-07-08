@@ -572,6 +572,201 @@ func (t *testSyncer) TestFetchMaps() {
 	})
 }
 
+func (t *testSyncer) TestSyncBlocksRetryRecomputesFromAfterPartialSuccess() {
+	prevheight := base.Height(3)
+	to := base.Height(8)
+	maps := t.maps(prevheight, to)
+	localLatest := maps[0]
+
+	args := t.newargs()
+	args.BlockMapFunc = func(_ context.Context, height base.Height) (base.BlockMap, bool, error) {
+		index := (height - prevheight).Int64()
+		if index < 0 || index >= int64(len(maps)) {
+			return nil, false, nil
+		}
+
+		return maps[index], true, nil
+	}
+	args.LocalLastBlockMapFunc = func() (base.BlockMap, bool, error) {
+		return localLatest, true, nil
+	}
+	args.LocalBlockMapFunc = func(height base.Height) (base.BlockMap, bool, error) {
+		index := (height - prevheight).Int64()
+		if index < 0 || index >= int64(len(maps)) {
+			return nil, false, nil
+		}
+
+		return maps[index], true, nil
+	}
+
+	var called int64
+	var froms []base.Height
+
+	args.NewImportBlocksFunc = func(
+		_ context.Context,
+		from, _ base.Height,
+		_ int64,
+		_ func(context.Context, base.Height) (base.BlockMap, bool, error),
+	) error {
+		froms = append(froms, from)
+
+		if atomic.AddInt64(&called, 1) == 1 {
+			localLatest = maps[2]
+
+			return errors.Errorf("partial import")
+		}
+
+		return nil
+	}
+
+	s := NewSyncer(maps[0], args)
+
+	newprev, err := s.doSync(context.Background(), maps[0], to)
+	t.NoError(err)
+	t.Equal([]base.Height{prevheight + 1, maps[2].Manifest().Height() + 1}, froms)
+	base.EqualBlockMap(t.Assert(), maps[len(maps)-1], newprev)
+}
+
+func (t *testSyncer) TestSyncBlocksRetryDoesNotReuseStaleOldTempFrom() {
+	prevheight := base.Height(15582)
+	to := base.Height(15620)
+	localheight := base.Height(15615)
+	maps := t.maps(prevheight, to)
+	localLatest := maps[(localheight - prevheight).Int64()]
+
+	args := t.newargs()
+	args.BlockMapFunc = func(_ context.Context, height base.Height) (base.BlockMap, bool, error) {
+		index := (height - prevheight).Int64()
+		if index < 0 || index >= int64(len(maps)) {
+			return nil, false, nil
+		}
+
+		return maps[index], true, nil
+	}
+	args.LocalLastBlockMapFunc = func() (base.BlockMap, bool, error) {
+		return localLatest, true, nil
+	}
+	args.LocalBlockMapFunc = func(height base.Height) (base.BlockMap, bool, error) {
+		index := (height - prevheight).Int64()
+		if index < 0 || index >= int64(len(maps)) {
+			return nil, false, nil
+		}
+
+		return maps[index], true, nil
+	}
+
+	var froms []base.Height
+	args.NewImportBlocksFunc = func(
+		_ context.Context,
+		from, _ base.Height,
+		_ int64,
+		_ func(context.Context, base.Height) (base.BlockMap, bool, error),
+	) error {
+		froms = append(froms, from)
+
+		return nil
+	}
+
+	s := NewSyncer(maps[0], args)
+
+	_, err := s.doSync(context.Background(), maps[0], to)
+	t.NoError(err)
+	t.Equal([]base.Height{localheight + 1}, froms)
+}
+
+func (t *testSyncer) TestSyncBlocksFromGreaterThanToKeepsLocalLatestPrev() {
+	prevheight := base.Height(10)
+	to := base.Height(12)
+	localheight := base.Height(15)
+	maps := t.maps(prevheight, localheight)
+	localLatest := maps[(localheight - prevheight).Int64()]
+
+	args := t.newargs()
+	args.BlockMapFunc = func(_ context.Context, height base.Height) (base.BlockMap, bool, error) {
+		index := (height - prevheight).Int64()
+		if index < 0 || index >= int64(len(maps)) {
+			return nil, false, nil
+		}
+
+		return maps[index], true, nil
+	}
+	args.LocalLastBlockMapFunc = func() (base.BlockMap, bool, error) {
+		return localLatest, true, nil
+	}
+	args.LocalBlockMapFunc = func(height base.Height) (base.BlockMap, bool, error) {
+		index := (height - prevheight).Int64()
+		if index < 0 || index >= int64(len(maps)) {
+			return nil, false, nil
+		}
+
+		return maps[index], true, nil
+	}
+	args.NewImportBlocksFunc = func(
+		context.Context,
+		base.Height,
+		base.Height,
+		int64,
+		func(context.Context, base.Height) (base.BlockMap, bool, error),
+	) error {
+		t.Fail("from > to should skip import")
+
+		return nil
+	}
+
+	s := NewSyncer(maps[0], args)
+
+	newprev, err := s.doSync(context.Background(), maps[0], to)
+	t.NoError(err)
+	base.EqualBlockMap(t.Assert(), localLatest, newprev)
+}
+
+func (t *testSyncer) TestSyncBlocksLocalLatestMustMatchTargetChain() {
+	prevheight := base.Height(3)
+	to := base.Height(8)
+	localheight := base.Height(6)
+	targetMaps := t.maps(prevheight, to)
+	localMaps := t.maps(prevheight, to)
+	localLatest := localMaps[(localheight - prevheight).Int64()]
+
+	args := t.newargs()
+	args.BlockMapFunc = func(_ context.Context, height base.Height) (base.BlockMap, bool, error) {
+		index := (height - prevheight).Int64()
+		if index < 0 || index >= int64(len(targetMaps)) {
+			return nil, false, nil
+		}
+
+		return targetMaps[index], true, nil
+	}
+	args.LocalLastBlockMapFunc = func() (base.BlockMap, bool, error) {
+		return localLatest, true, nil
+	}
+	args.LocalBlockMapFunc = func(height base.Height) (base.BlockMap, bool, error) {
+		index := (height - prevheight).Int64()
+		if index < 0 || index >= int64(len(localMaps)) {
+			return nil, false, nil
+		}
+
+		return localMaps[index], true, nil
+	}
+	args.NewImportBlocksFunc = func(
+		context.Context,
+		base.Height,
+		base.Height,
+		int64,
+		func(context.Context, base.Height) (base.BlockMap, bool, error),
+	) error {
+		t.Fail("inconsistent local chain should fail before import")
+
+		return nil
+	}
+
+	s := NewSyncer(targetMaps[0], args)
+
+	_, err := s.doSync(context.Background(), targetMaps[0], to)
+	t.Error(err)
+	t.ErrorContains(err, "different blockmaps")
+}
+
 func (t *testSyncer) TestFetchBlockItem() {
 	lastheight := base.Height(3)
 	to := lastheight + 10

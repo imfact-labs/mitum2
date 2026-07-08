@@ -19,7 +19,9 @@ type (
 	NewBlockImporterFunc   func(base.BlockMap) (isaac.BlockImporter, error)
 	SyncerLastBlockMapFunc func(_ context.Context, manifest util.Hash) (
 		_ base.BlockMap, updated bool, _ error) // NOTE BlockMap.IsValid() should be called
-	NewImportBlocksFunc func(
+	SyncerLocalLastBlockMapFunc func() (base.BlockMap, bool, error)
+	SyncerLocalBlockMapFunc     func(base.Height) (base.BlockMap, bool, error)
+	NewImportBlocksFunc         func(
 		_ context.Context,
 		from, to base.Height,
 		batchlimit int64,
@@ -28,23 +30,27 @@ type (
 )
 
 type SyncerArgs struct {
-	LastBlockMapFunc     SyncerLastBlockMapFunc
-	BlockMapFunc         isaacblock.ImportBlocksBlockMapFunc
-	TempSyncPool         isaac.TempSyncPool
-	WhenStoppedFunc      func() error
-	RemovePrevBlockFunc  func(base.Height) (bool, error)
-	NewImportBlocksFunc  NewImportBlocksFunc
-	BatchLimit           int64
-	LastBlockMapInterval time.Duration
-	LastBlockMapTimeout  time.Duration
+	LastBlockMapFunc      SyncerLastBlockMapFunc
+	BlockMapFunc          isaacblock.ImportBlocksBlockMapFunc
+	LocalLastBlockMapFunc SyncerLocalLastBlockMapFunc
+	LocalBlockMapFunc     SyncerLocalBlockMapFunc
+	TempSyncPool          isaac.TempSyncPool
+	WhenStoppedFunc       func() error
+	RemovePrevBlockFunc   func(base.Height) (bool, error)
+	NewImportBlocksFunc   NewImportBlocksFunc
+	BatchLimit            int64
+	LastBlockMapInterval  time.Duration
+	LastBlockMapTimeout   time.Duration
 }
 
 func NewSyncerArgs() SyncerArgs {
 	return SyncerArgs{
-		LastBlockMapFunc:    func(context.Context, util.Hash) (base.BlockMap, bool, error) { return nil, false, nil },
-		BlockMapFunc:        func(context.Context, base.Height) (base.BlockMap, bool, error) { return nil, false, nil },
-		WhenStoppedFunc:     func() error { return nil },
-		RemovePrevBlockFunc: func(base.Height) (bool, error) { return false, nil },
+		LastBlockMapFunc:      func(context.Context, util.Hash) (base.BlockMap, bool, error) { return nil, false, nil },
+		BlockMapFunc:          func(context.Context, base.Height) (base.BlockMap, bool, error) { return nil, false, nil },
+		LocalLastBlockMapFunc: func() (base.BlockMap, bool, error) { return nil, false, nil },
+		LocalBlockMapFunc:     func(base.Height) (base.BlockMap, bool, error) { return nil, false, nil },
+		WhenStoppedFunc:       func() error { return nil },
+		RemovePrevBlockFunc:   func(base.Height) (bool, error) { return false, nil },
 		NewImportBlocksFunc: func(context.Context, base.Height, base.Height, int64,
 			func(context.Context, base.Height) (base.BlockMap, bool, error),
 		) error {
@@ -326,11 +332,16 @@ func (s *Syncer) doSync(ctx context.Context, prev base.BlockMap, to base.Height)
 
 	l.Debug().Interface("new_previous_map", newprev).Msg("maps prepared")
 
-	if err := s.syncBlocks(ctx, prev, to); err != nil {
+	blocksyncedprev, err := s.syncBlocks(ctx, prev, to)
+	if err != nil {
 		return nil, e.Wrap(err)
 	}
 
 	l.Debug().Msg("blocks synced")
+
+	if blocksyncedprev != nil && newprev.Manifest().Height() < blocksyncedprev.Manifest().Height() {
+		return blocksyncedprev, nil
+	}
 
 	return newprev, nil
 }
@@ -407,15 +418,30 @@ func (s *Syncer) fetchMap(ctx context.Context, height base.Height) (base.BlockMa
 	}
 }
 
-func (s *Syncer) syncBlocks(ctx context.Context, prev base.BlockMap, to base.Height) error {
+func (s *Syncer) syncBlocks(ctx context.Context, prev base.BlockMap, to base.Height) (base.BlockMap, error) {
 	e := util.StringError("sync blocks")
 
-	from := base.GenesisHeight
+	originalFrom := base.GenesisHeight
+	originalPrevHeight := base.NilHeight
 	if prev != nil {
-		from = prev.Manifest().Height() + 1
+		originalPrevHeight = prev.Manifest().Height()
+		originalFrom = originalPrevHeight + 1
 	}
 
+	var syncedprev base.BlockMap
+
 	if err := util.Retry(ctx, func() (bool, error) {
+		from, latest, err := s.syncBlocksFrom(originalFrom, originalPrevHeight, to)
+		if err != nil {
+			return false, err
+		}
+
+		if from > to {
+			syncedprev = latest
+
+			return false, nil
+		}
+
 		if err := s.args.NewImportBlocksFunc(
 			ctx,
 			from, to,
@@ -432,15 +458,67 @@ func (s *Syncer) syncBlocks(ctx context.Context, prev base.BlockMap, to base.Hei
 			return true, err
 		}
 
+		switch m, found, err := s.args.TempSyncPool.BlockMap(to); {
+		case err != nil:
+			return false, err
+		case !found:
+			return false, util.ErrNotFound.Errorf("synced BlockMap not found")
+		default:
+			syncedprev = m
+		}
+
 		return false, nil
 	},
 		-1,
 		time.Second,
 	); err != nil {
-		return e.Wrap(err)
+		return nil, e.Wrap(err)
 	}
 
-	return nil
+	return syncedprev, nil
+}
+
+func (s *Syncer) syncBlocksFrom(
+	originalFrom, originalPrevHeight, to base.Height,
+) (base.Height, base.BlockMap, error) {
+	switch latest, found, err := s.args.LocalLastBlockMapFunc(); {
+	case err != nil:
+		return base.NilHeight, nil, err
+	case !found, latest == nil, latest.Manifest().Height() <= originalPrevHeight:
+		return originalFrom, nil, nil
+	case latest.Manifest().Height() <= to:
+		if err := s.checkLocalBlockMapInTarget(latest); err != nil {
+			return base.NilHeight, nil, err
+		}
+
+		return latest.Manifest().Height() + 1, latest, nil
+	default:
+		switch m, found, err := s.args.LocalBlockMapFunc(to); {
+		case err != nil:
+			return base.NilHeight, nil, err
+		case !found:
+			return base.NilHeight, nil, util.ErrNotFound.Errorf("local BlockMap not found, %d", to)
+		default:
+			if err := s.checkLocalBlockMapInTarget(m); err != nil {
+				return base.NilHeight, nil, err
+			}
+
+			return latest.Manifest().Height() + 1, latest, nil
+		}
+	}
+}
+
+func (s *Syncer) checkLocalBlockMapInTarget(local base.BlockMap) error {
+	height := local.Manifest().Height()
+
+	switch target, found, err := s.args.TempSyncPool.BlockMap(height); {
+	case err != nil:
+		return err
+	case !found:
+		return util.ErrNotFound.Errorf("target BlockMap not found, %d", height)
+	default:
+		return base.IsEqualBlockMap(local, target)
+	}
 }
 
 func (s *Syncer) updateLastBlockMap(ctx context.Context) {
