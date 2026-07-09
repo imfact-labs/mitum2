@@ -4,7 +4,6 @@ import (
 	"context"
 	"math"
 	"sync"
-	"sync/atomic"
 
 	"github.com/imfact-labs/mitum2/base"
 	"github.com/imfact-labs/mitum2/util"
@@ -27,6 +26,8 @@ var (
 type (
 	NewOperationProcessorFunc         func(base.Height, hint.Hint, base.GetStateFunc) (base.OperationProcessor, error)
 	NewOperationProcessorInternalFunc func(base.Height, base.GetStateFunc) (base.OperationProcessor, error)
+	OperationExecutionClass           string
+	OperationExecutionClassFunc       func(base.Operation) OperationExecutionClass
 
 	// OperationProcessorGetOperationFunction works,
 	// - if operation is invalid, getOperation should return nil,
@@ -44,6 +45,11 @@ type (
 	NewBlockWriterFunc func(base.ProposalSignFact, base.GetStateFunc) (BlockWriter, error)
 )
 
+const (
+	OperationExecutionClassParallel OperationExecutionClass = "parallel"
+	OperationExecutionClassSerial   OperationExecutionClass = "serial"
+)
+
 type ProposalProcessor interface {
 	Proposal() base.ProposalSignFact
 	Process(context.Context, base.INITVoteproof) (base.Manifest, error)
@@ -52,18 +58,22 @@ type ProposalProcessor interface {
 }
 
 type DefaultProposalProcessorArgs struct {
-	NewWriterFunc             NewBlockWriterFunc
-	GetStateFunc              base.GetStateFunc
-	GetOperationFunc          OperationProcessorGetOperationFunction
-	NewOperationProcessorFunc NewOperationProcessorFunc
-	EmptyProposalNoBlockFunc  func() bool
-	MaxWorkerSize             int64
+	NewWriterFunc               NewBlockWriterFunc
+	GetStateFunc                base.GetStateFunc
+	GetOperationFunc            OperationProcessorGetOperationFunction
+	NewOperationProcessorFunc   NewOperationProcessorFunc
+	OperationExecutionClassFunc OperationExecutionClassFunc
+	EmptyProposalNoBlockFunc    func() bool
+	MaxWorkerSize               int64
 }
 
 func NewDefaultProposalProcessorArgs() *DefaultProposalProcessorArgs {
 	return &DefaultProposalProcessorArgs{
 		NewOperationProcessorFunc: func(base.Height, hint.Hint, base.GetStateFunc) (base.OperationProcessor, error) {
 			return nil, nil
+		},
+		OperationExecutionClassFunc: func(base.Operation) OperationExecutionClass {
+			return OperationExecutionClassParallel
 		},
 		MaxWorkerSize:            1 << 13, //nolint:gomnd // big enough
 		EmptyProposalNoBlockFunc: func() bool { return false },
@@ -344,24 +354,12 @@ func (p *DefaultProposalProcessor) processOperations(ctx context.Context, cops, 
 
 	p.writer.SetOperationsSize(uint64(nops))
 
-	var worker *util.BaseJobWorker
-
-	{
-		workersize := int64(nops)
-		if workersize > p.args.MaxWorkerSize {
-			workersize = p.args.MaxWorkerSize
-		}
-
-		switch i, err := util.NewBaseJobWorker(ctx, workersize); {
-		case err != nil:
-			return e.Wrap(err)
-		default:
-			worker = i
-
-			defer worker.Close()
-		}
+	type processJob struct {
+		index uint64
+		op    base.Operation
 	}
 
+	var serialJobs, parallelJobs []processJob
 	var hasresultcount int64
 
 	pctx := ctx
@@ -380,101 +378,145 @@ func (p *DefaultProposalProcessor) processOperations(ctx context.Context, cops, 
 			continue
 		}
 
-		index := i
-
+		var class OperationExecutionClass
 		var hasresult bool
 		var err error
 
-		switch pctx, hasresult, err = p.processOperation(pctx, worker, op, index); {
+		switch pctx, class, hasresult, err = p.preProcessOperation(pctx, op, uint64(i)); {
 		case err != nil:
 			return e.Wrap(err)
 		case hasresult:
-			atomic.AddInt64(&hasresultcount, 1)
+			hasresultcount++
+		}
+
+		switch {
+		case class == "":
+			continue
+		case class == OperationExecutionClassSerial:
+			serialJobs = append(serialJobs, processJob{index: uint64(i), op: op})
+		case class == OperationExecutionClassParallel:
+			parallelJobs = append(parallelJobs, processJob{index: uint64(i), op: op})
 		}
 	}
 
-	worker.Done()
+	for i := range serialJobs {
+		job := serialJobs[i]
 
-	if err := worker.Wait(); err != nil {
-		return e.Wrap(err)
+		if err := p.doProcessOperation(ctx, p.writer, p.args.NewOperationProcessorFunc, job.index, job.op); err != nil {
+			return e.Wrap(err)
+		}
 	}
 
-	if atomic.LoadInt64(&hasresultcount) < 1 && p.args.EmptyProposalNoBlockFunc() {
+	if len(parallelJobs) > 0 {
+		workersize := int64(len(parallelJobs))
+		if workersize > p.args.MaxWorkerSize {
+			workersize = p.args.MaxWorkerSize
+		}
+
+		worker, err := util.NewBaseJobWorker(ctx, workersize)
+		if err != nil {
+			return e.Wrap(err)
+		}
+
+		defer worker.Close()
+
+		for i := range parallelJobs {
+			job := parallelJobs[i]
+
+			if err := worker.NewJob(func(ctx context.Context, _ uint64) error {
+				return p.doProcessOperation(ctx, p.writer, p.args.NewOperationProcessorFunc, job.index, job.op)
+			}); err != nil {
+				return e.Wrap(err)
+			}
+		}
+
+		worker.Done()
+
+		if err := worker.Wait(); err != nil {
+			return e.Wrap(err)
+		}
+	}
+
+	if hasresultcount < 1 && p.args.EmptyProposalNoBlockFunc() {
 		return ErrProposalProcessorEmptyOperations.Errorf("process")
 	}
 
 	return nil
 }
 
-func (p *DefaultProposalProcessor) processOperation(
+func (p *DefaultProposalProcessor) preProcessOperation(
 	ctx context.Context,
-	worker *util.BaseJobWorker,
 	op base.Operation,
-	opsindex int,
-) (_ context.Context, hasresult bool, _ error) {
+	opsindex uint64,
+) (_ context.Context, _ OperationExecutionClass, hasresult bool, _ error) {
 	writer := p.writer
 
 	if rop, ok := op.(ReasonProcessedOperation); ok {
-		if err := worker.NewJob(func(ctx context.Context, _ uint64) error {
-			return writer.SetProcessResult( //nolint:wrapcheck //...
-				ctx, uint64(opsindex), rop.OperationHash(), rop.FactHash(), false, rop.Reason())
-		}); err != nil {
-			return ctx, false, err
+		if err := writer.SetProcessResult( //nolint:wrapcheck //...
+			ctx, opsindex, rop.OperationHash(), rop.FactHash(), false, rop.Reason()); err != nil {
+			return ctx, "", false, err
 		}
 
-		if err := worker.NewJob(func(ctx context.Context, _ uint64) error {
-			return writer.SetOperationReceipt(
-				ctx, uint64(opsindex), rop.OperationHash(), rop.FactHash(), nil,
-			)
-		}); err != nil {
-			return ctx, false, err
+		if err := writer.SetOperationReceipt(
+			ctx, opsindex, rop.OperationHash(), rop.FactHash(), nil,
+		); err != nil {
+			return ctx, "", false, err
 		}
 
-		return ctx, true, nil
+		return ctx, "", true, nil
 	}
 
 	var nctx context.Context
 
 	switch pctx, reasonerr, passed, err := p.doPreProcessOperation(ctx, op); {
 	case err != nil:
-		return pctx, true, errors.WithMessage(err, "pre process operation")
+		return pctx, "", true, errors.WithMessage(err, "pre process operation")
 	case reasonerr != nil:
-		if err := worker.NewJob(func(ctx context.Context, _ uint64) error {
-			if err := writer.SetStates(ctx, uint64(opsindex), []base.StateMergeValue{}, op); err != nil {
-				return err
-			}
-
-			return writer.SetProcessResult(
-				ctx, uint64(opsindex), op.Hash(), op.Fact().Hash(), false, reasonerr,
-			)
-		}); err != nil {
-			return pctx, false, err
+		if err := writer.SetStates(ctx, opsindex, []base.StateMergeValue{}, op); err != nil {
+			return pctx, "", false, err
 		}
 
-		if err := worker.NewJob(func(ctx context.Context, _ uint64) error {
-			return writer.SetOperationReceipt(
-				ctx, uint64(opsindex), op.Hash(), op.Fact().Hash(), nil,
-			)
-		}); err != nil {
-			return pctx, false, err
+		if err := writer.SetProcessResult(
+			ctx, opsindex, op.Hash(), op.Fact().Hash(), false, reasonerr,
+		); err != nil {
+			return pctx, "", false, err
 		}
 
-		return pctx, true, nil
+		if err := writer.SetOperationReceipt(
+			ctx, opsindex, op.Hash(), op.Fact().Hash(), nil,
+		); err != nil {
+			return pctx, "", false, err
+		}
+
+		return pctx, "", true, nil
 	case !passed:
-		return pctx, false, nil
+		return pctx, "", false, nil
 	default:
 		nctx = pctx
 	}
 
-	newOperationProcessor := p.args.NewOperationProcessorFunc
+	switch class, err := p.operationExecutionClass(op); {
+	case err != nil:
+		return nctx, "", false, err
+	default:
+		return nctx, class, true, nil
+	}
+}
 
-	if err := worker.NewJob(func(ctx context.Context, _ uint64) error {
-		return p.doProcessOperation(ctx, writer, newOperationProcessor, uint64(opsindex), op)
-	}); err != nil {
-		return nctx, false, err
+func (p *DefaultProposalProcessor) operationExecutionClass(op base.Operation) (OperationExecutionClass, error) {
+	classf := p.args.OperationExecutionClassFunc
+	if classf == nil {
+		return OperationExecutionClassParallel, nil
 	}
 
-	return nctx, true, nil
+	class := classf(op)
+
+	switch class {
+	case OperationExecutionClassParallel, OperationExecutionClassSerial:
+		return class, nil
+	default:
+		return "", errors.Errorf("unknown operation execution class: %q", class)
+	}
 }
 
 func (p *DefaultProposalProcessor) doPreProcessOperation(

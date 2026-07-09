@@ -31,6 +31,9 @@ type DummyBlockWriter struct {
 	ops          []base.Operation
 	receipts     []base.OperationReceiptRecord
 	sts          *util.SingleLockedMap[string, base.StateValueMerger]
+	setstates    []uint64
+	setresults   []uint64
+	setreceipts  []uint64
 	setstatesf   func(context.Context, uint64, []base.StateMergeValue, base.Operation) error
 	savef        func(context.Context) (base.BlockMap, error)
 }
@@ -50,6 +53,10 @@ func (w *DummyBlockWriter) SetOperationsSize(n uint64) {
 }
 
 func (w *DummyBlockWriter) SetProcessResult(ctx context.Context, index uint64, _, facthash util.Hash, instate bool, errorreason base.OperationProcessReasonError) error {
+	w.Lock()
+	w.setresults = append(w.setresults, index)
+	w.Unlock()
+
 	var msg string
 	if errorreason != nil {
 		msg = errorreason.Msg()
@@ -75,6 +82,10 @@ func (w *DummyBlockWriter) SetOperationReceipt(
 	ophash, facthash util.Hash,
 	receipt base.OperationReceipt,
 ) error {
+	w.Lock()
+	w.setreceipts = append(w.setreceipts, index)
+	w.Unlock()
+
 	if int(index) >= len(w.receipts) {
 		newreceipts := make([]base.OperationReceiptRecord, index+1)
 		copy(newreceipts, w.receipts)
@@ -87,6 +98,10 @@ func (w *DummyBlockWriter) SetOperationReceipt(
 }
 
 func (w *DummyBlockWriter) SetStates(ctx context.Context, index uint64, states []base.StateMergeValue, operation base.Operation) error {
+	w.Lock()
+	w.setstates = append(w.setstates, index)
+	w.Unlock()
+
 	if w.setstatesf != nil {
 		return w.setstatesf(ctx, index, states, operation)
 	}
@@ -1983,6 +1998,304 @@ func (t *testDefaultProposalProcessor) TestEmptyAfterProcessEmptyProposalNoBlock
 		t.Error(err)
 		t.Nil(m)
 		t.ErrorIs(err, ErrProposalProcessorEmptyOperations)
+	})
+}
+
+func (t *testDefaultProposalProcessor) TestOperationExecutionClassDefaultAndNilAreParallel() {
+	point := base.RawPoint(33, 44)
+	ophs, ops, _ := t.prepareOperations(point.Height()-1, 2)
+	pr := t.newproposal(NewProposalFact(point, t.Local.Address(), valuehash.RandomSHA256(), ophs))
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	manifest := base.NewDummyManifest(point.Height(), valuehash.RandomSHA256())
+
+	for _, name := range []string{"default", "nil"} {
+		t.Run(name, func() {
+			writer, newwriterf := t.newBlockWriter()
+			writer.manifest = manifest
+
+			args := t.newargs(newwriterf)
+			if name == "nil" {
+				args.OperationExecutionClassFunc = nil
+			}
+
+			args.GetOperationFunc = func(_ context.Context, oph, _ util.Hash) (base.Operation, error) {
+				return ops[oph.String()], nil
+			}
+
+			opp, _ := NewDefaultProposalProcessor(pr, previous, args)
+			m, err := opp.Process(context.Background(), nil)
+			t.NoError(err)
+			t.NotNil(m)
+			t.ElementsMatch([]uint64{0, 1}, writer.setstates)
+			t.ElementsMatch([]uint64{0, 1}, writer.setresults)
+			t.ElementsMatch([]uint64{0, 1}, writer.setreceipts)
+		})
+	}
+}
+
+func (t *testDefaultProposalProcessor) TestOperationExecutionClassCallTimingAndPreProcessOrder() {
+	point := base.RawPoint(33, 44)
+	ophs, ops, sts := t.prepareOperations(point.Height()-1, 4)
+	pr := t.newproposal(NewProposalFact(point, t.Local.Address(), valuehash.RandomSHA256(), ophs))
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	manifest := base.NewDummyManifest(point.Height(), valuehash.RandomSHA256())
+	writer, newwriterf := t.newBlockWriter()
+	writer.manifest = manifest
+
+	var preprocessed []uint64
+	var classified []uint64
+
+	args := t.newargs(newwriterf)
+	args.GetOperationFunc = func(_ context.Context, oph, _ util.Hash) (base.Operation, error) {
+		if oph.Equal(ophs[0][0]) {
+			return nil, ErrInvalidOperationInProcessor.Errorf("already invalid")
+		}
+
+		return ops[oph.String()], nil
+	}
+	args.NewOperationProcessorFunc = func(_ base.Height, ht hint.Hint, _ base.GetStateFunc) (base.OperationProcessor, error) {
+		if !ht.IsCompatible(DummyOperationHint) {
+			return nil, nil
+		}
+
+		return &DummyOperationProcessor{
+			preprocess: func(ctx context.Context, op base.Operation, _ base.GetStateFunc) (context.Context, base.OperationProcessReasonError, error) {
+				switch h := op.Fact().Hash(); {
+				case h.Equal(ophs[1][1]):
+					preprocessed = append(preprocessed, 1)
+
+					return ctx, base.NewBaseOperationProcessReasonError("reason"), nil
+				case h.Equal(ophs[2][1]):
+					preprocessed = append(preprocessed, 2)
+
+					return ctx, nil, ErrSuspendOperation
+				default:
+					preprocessed = append(preprocessed, 3)
+
+					return ctx, nil, nil
+				}
+			},
+			process: func(_ context.Context, op base.Operation, _ base.GetStateFunc) ([]base.StateMergeValue, base.OperationProcessReasonError, error) {
+				return []base.StateMergeValue{sts[op.Fact().Hash().String()]}, nil, nil
+			},
+		}, nil
+	}
+	args.OperationExecutionClassFunc = func(op base.Operation) OperationExecutionClass {
+		for i := range ophs {
+			if op.Fact().Hash().Equal(ophs[i][1]) {
+				classified = append(classified, uint64(i))
+			}
+		}
+
+		return OperationExecutionClassParallel
+	}
+
+	opp, _ := NewDefaultProposalProcessor(pr, previous, args)
+	m, err := opp.Process(context.Background(), nil)
+	t.NoError(err)
+	t.NotNil(m)
+	t.Equal([]uint64{1, 2, 3}, preprocessed)
+	t.Equal([]uint64{3}, classified)
+	t.ElementsMatch([]uint64{0, 1, 3}, writer.setresults)
+}
+
+func (t *testDefaultProposalProcessor) TestOperationExecutionClassSerialBeforeParallelAndIndexes() {
+	point := base.RawPoint(33, 44)
+	ophs, ops, sts := t.prepareOperations(point.Height()-1, 4)
+	pr := t.newproposal(NewProposalFact(point, t.Local.Address(), valuehash.RandomSHA256(), ophs))
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	manifest := base.NewDummyManifest(point.Height(), valuehash.RandomSHA256())
+	writer, newwriterf := t.newBlockWriter()
+	writer.manifest = manifest
+
+	var mu sync.Mutex
+	var preprocessed, serialProcessed []uint64
+	var serialDone bool
+	var parallelStartedAfterSerial bool
+
+	args := t.newargs(newwriterf)
+	args.GetOperationFunc = func(_ context.Context, oph, _ util.Hash) (base.Operation, error) {
+		return ops[oph.String()], nil
+	}
+	args.NewOperationProcessorFunc = func(_ base.Height, ht hint.Hint, _ base.GetStateFunc) (base.OperationProcessor, error) {
+		if !ht.IsCompatible(DummyOperationHint) {
+			return nil, nil
+		}
+
+		return &DummyOperationProcessor{
+			preprocess: func(ctx context.Context, op base.Operation, _ base.GetStateFunc) (context.Context, base.OperationProcessReasonError, error) {
+				for i := range ophs {
+					if op.Fact().Hash().Equal(ophs[i][1]) {
+						preprocessed = append(preprocessed, uint64(i))
+					}
+				}
+
+				return ctx, nil, nil
+			},
+			process: func(_ context.Context, op base.Operation, _ base.GetStateFunc) ([]base.StateMergeValue, base.OperationProcessReasonError, error) {
+				var index uint64
+				for i := range ophs {
+					if op.Fact().Hash().Equal(ophs[i][1]) {
+						index = uint64(i)
+					}
+				}
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				switch index {
+				case 1, 3:
+					serialProcessed = append(serialProcessed, index)
+					if len(serialProcessed) == 2 {
+						serialDone = true
+					}
+				default:
+					if serialDone {
+						parallelStartedAfterSerial = true
+					}
+				}
+
+				return []base.StateMergeValue{sts[op.Fact().Hash().String()]}, nil, nil
+			},
+		}, nil
+	}
+	args.OperationExecutionClassFunc = func(op base.Operation) OperationExecutionClass {
+		switch {
+		case op.Fact().Hash().Equal(ophs[1][1]), op.Fact().Hash().Equal(ophs[3][1]):
+			return OperationExecutionClassSerial
+		default:
+			return OperationExecutionClassParallel
+		}
+	}
+
+	opp, _ := NewDefaultProposalProcessor(pr, previous, args)
+	m, err := opp.Process(context.Background(), nil)
+	t.NoError(err)
+	t.NotNil(m)
+	t.Equal([]uint64{0, 1, 2, 3}, preprocessed)
+	t.Equal([]uint64{1, 3}, serialProcessed)
+	t.True(parallelStartedAfterSerial)
+	t.ElementsMatch([]uint64{0, 1, 2, 3}, writer.setstates)
+	t.ElementsMatch([]uint64{0, 1, 2, 3}, writer.setresults)
+	t.ElementsMatch([]uint64{0, 1, 2, 3}, writer.setreceipts)
+}
+
+func (t *testDefaultProposalProcessor) TestOperationExecutionClassInvalidFailsBeforeProcess() {
+	point := base.RawPoint(33, 44)
+	ophs, ops, _ := t.prepareOperations(point.Height()-1, 1)
+	pr := t.newproposal(NewProposalFact(point, t.Local.Address(), valuehash.RandomSHA256(), ophs))
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	manifest := base.NewDummyManifest(point.Height(), valuehash.RandomSHA256())
+	writer, newwriterf := t.newBlockWriter()
+	writer.manifest = manifest
+
+	var processed bool
+
+	args := t.newargs(newwriterf)
+	args.GetOperationFunc = func(_ context.Context, oph, _ util.Hash) (base.Operation, error) {
+		return ops[oph.String()], nil
+	}
+	args.NewOperationProcessorFunc = func(_ base.Height, ht hint.Hint, _ base.GetStateFunc) (base.OperationProcessor, error) {
+		if !ht.IsCompatible(DummyOperationHint) {
+			return nil, nil
+		}
+
+		return &DummyOperationProcessor{
+			preprocess: func(ctx context.Context, _ base.Operation, _ base.GetStateFunc) (context.Context, base.OperationProcessReasonError, error) {
+				return ctx, nil, nil
+			},
+			process: func(_ context.Context, _ base.Operation, _ base.GetStateFunc) ([]base.StateMergeValue, base.OperationProcessReasonError, error) {
+				processed = true
+
+				return nil, nil, nil
+			},
+		}, nil
+	}
+	args.OperationExecutionClassFunc = func(base.Operation) OperationExecutionClass {
+		return OperationExecutionClass("bad")
+	}
+
+	opp, _ := NewDefaultProposalProcessor(pr, previous, args)
+	m, err := opp.Process(context.Background(), nil)
+	t.Error(err)
+	t.Nil(m)
+	t.ErrorContains(err, "unknown operation execution class")
+	t.False(processed)
+}
+
+func (t *testDefaultProposalProcessor) TestOperationExecutionClassSerialErrors() {
+	point := base.RawPoint(33, 44)
+	ophs, ops, _ := t.prepareOperations(point.Height()-1, 1)
+	pr := t.newproposal(NewProposalFact(point, t.Local.Address(), valuehash.RandomSHA256(), ophs))
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	manifest := base.NewDummyManifest(point.Height(), valuehash.RandomSHA256())
+
+	t.Run("hard error", func() {
+		writer, newwriterf := t.newBlockWriter()
+		writer.manifest = manifest
+
+		args := t.newargs(newwriterf)
+		args.GetOperationFunc = func(_ context.Context, oph, _ util.Hash) (base.Operation, error) {
+			return ops[oph.String()], nil
+		}
+		args.NewOperationProcessorFunc = func(_ base.Height, ht hint.Hint, _ base.GetStateFunc) (base.OperationProcessor, error) {
+			if !ht.IsCompatible(DummyOperationHint) {
+				return nil, nil
+			}
+
+			return &DummyOperationProcessor{
+				preprocess: func(ctx context.Context, _ base.Operation, _ base.GetStateFunc) (context.Context, base.OperationProcessReasonError, error) {
+					return ctx, nil, nil
+				},
+				process: func(context.Context, base.Operation, base.GetStateFunc) ([]base.StateMergeValue, base.OperationProcessReasonError, error) {
+					return nil, nil, errors.Errorf("serial hard error")
+				},
+			}, nil
+		}
+		args.OperationExecutionClassFunc = func(base.Operation) OperationExecutionClass {
+			return OperationExecutionClassSerial
+		}
+
+		opp, _ := NewDefaultProposalProcessor(pr, previous, args)
+		m, err := opp.Process(context.Background(), nil)
+		t.Error(err)
+		t.Nil(m)
+		t.ErrorContains(err, "serial hard error")
+	})
+
+	t.Run("reason error", func() {
+		writer, newwriterf := t.newBlockWriter()
+		writer.manifest = manifest
+
+		args := t.newargs(newwriterf)
+		args.GetOperationFunc = func(_ context.Context, oph, _ util.Hash) (base.Operation, error) {
+			return ops[oph.String()], nil
+		}
+		args.NewOperationProcessorFunc = func(_ base.Height, ht hint.Hint, _ base.GetStateFunc) (base.OperationProcessor, error) {
+			if !ht.IsCompatible(DummyOperationHint) {
+				return nil, nil
+			}
+
+			return &DummyOperationProcessor{
+				preprocess: func(ctx context.Context, _ base.Operation, _ base.GetStateFunc) (context.Context, base.OperationProcessReasonError, error) {
+					return ctx, nil, nil
+				},
+				process: func(context.Context, base.Operation, base.GetStateFunc) ([]base.StateMergeValue, base.OperationProcessReasonError, error) {
+					return nil, base.ErrNotChangedOperationProcessReason, nil
+				},
+			}, nil
+		}
+		args.OperationExecutionClassFunc = func(base.Operation) OperationExecutionClass {
+			return OperationExecutionClassSerial
+		}
+
+		opp, _ := NewDefaultProposalProcessor(pr, previous, args)
+		m, err := opp.Process(context.Background(), nil)
+		t.NoError(err)
+		t.NotNil(m)
+		t.Equal([]uint64{0}, writer.setstates)
+		t.Equal([]uint64{0}, writer.setresults)
+		t.Equal([]uint64{0}, writer.setreceipts)
 	})
 }
 
