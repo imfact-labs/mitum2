@@ -57,12 +57,12 @@ func TestingDialFunc[T quicstreamheader.RequestHeader](encs *encoder.Encoders, p
 
 	remote := quicstream.RandomUDPAddr()
 
-	handlerf := func() error {
+	handlerf := func(ctx context.Context) error {
 		defer func() {
 			_ = hw.Close()
 		}()
 
-		_, err := ph.Handler(context.Background(), remote, hr, hw)
+		_, err := ph.Handler(ctx, remote, hr, hw)
 
 		if errors.Is(err, quicstream.ErrHandlerNotFound) {
 			go func() {
@@ -82,7 +82,7 @@ func TestingDialFunc[T quicstreamheader.RequestHeader](encs *encoder.Encoders, p
 	return remote, func(ctx context.Context, _ quicstream.ConnInfo) (quicstream.Streamer, error) {
 		donech := make(chan error, 1)
 		go func() {
-			donech <- handlerf()
+			donech <- handlerf(ctx)
 		}()
 
 		dctx, cancel := context.WithCancel(ctx)

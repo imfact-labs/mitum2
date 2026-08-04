@@ -21,9 +21,12 @@ var (
 	DefaultMinWaitNextBlockINITBallot = time.Second * 2
 	DefaultSyncerLastBlockMapInterval = time.Second * 2
 	DefaultMinProposerWait            = time.Second * 4
-	DefaultStateCacheSize             = 1 << 12
-	DefaultOperationPoolCacheSize     = 1 << 12
-	DefaultBroadcastTimerMult         = 5
+	// DefaultProposalOperationTimeout leaves half of the default minimum
+	// proposer wait for signing and persisting an empty fallback.
+	DefaultProposalOperationTimeout = DefaultMinProposerWait / 2
+	DefaultStateCacheSize           = 1 << 12
+	DefaultOperationPoolCacheSize   = 1 << 12
+	DefaultBroadcastTimerMult       = 5
 )
 
 type Params struct {

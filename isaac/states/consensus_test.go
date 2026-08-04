@@ -361,6 +361,35 @@ func (t *testConsensusHandler) TestMakeINITBallotProposalUnavailable() {
 	t.True(bl.BallotSignFact().BallotFact().PreviousBlock().Equal(prevBlock))
 }
 
+func (t *testConsensusHandler) TestMakeINITBallotRejectsProposalThatBecameStale() {
+	point := base.RawPoint(33, 0)
+	suf, nodes := isaac.NewTestSuffrage(2, t.Local)
+	previous := base.NewDummyManifest(point.Height()-1, valuehash.RandomSHA256())
+	args := t.newargs(previous, suf)
+	advanced := false
+	args.LastManifestForBallotFunc = func() (base.Manifest, bool, error) {
+		if !advanced {
+			return previous, true, nil
+		}
+
+		return base.NewDummyManifest(point.Height()+2, valuehash.RandomSHA256()), true, nil
+	}
+	args.ProposalSelectFunc = func(context.Context, base.Point, util.Hash, time.Duration) (base.ProposalSignFact, error) {
+		advanced = true
+
+		return t.PRPool.ByPoint(point), nil
+	}
+	st, closef := t.newState(args)
+	defer closef()
+	st.ballotBroadcaster = NewDummyBallotBroadcaster(t.Local.Address(), func(base.Ballot) error { return nil })
+	fact := t.PRPool.GetFact(point)
+	avp, _ := t.VoteproofsPair(point.PrevHeight(), point, nil, nil, fact.Hash(), nodes)
+
+	bl, err := st.makeINITBallot(context.Background(), point, avp.BallotMajority().NewBlock(), avp, suf, time.Nanosecond)
+	t.Nil(bl)
+	t.ErrorIs(err, isaac.ErrStaleProposalPoint)
+}
+
 func (t *testConsensusHandler) TestPrepareNextBlockBallotStaleProposalPointDiscarded() {
 	point := base.RawPoint(33, 0)
 	suf, nodes := isaac.NewTestSuffrage(2, t.Local)

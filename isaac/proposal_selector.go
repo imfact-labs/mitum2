@@ -109,7 +109,7 @@ func (p *BaseProposalSelector) selectInternal(
 
 		return nil, errors.WithMessagef(err, "get suffrage for height, %d", point.Height())
 	case len(i) < 2:
-		pr, err := p.proposalFromNode(wctx, point, i[0], previousBlock)
+		pr, err := p.proposalFromNode(ctx, wctx, point, i[0], previousBlock)
 		if err != nil {
 			return nil, p.handleProposalRequestFailure(ctx, wctx, point, i[0], previousBlock, err)
 		}
@@ -119,7 +119,7 @@ func (p *BaseProposalSelector) selectInternal(
 		nodes = i
 	}
 
-	switch pr, proposer, err := p.selectFromProposer(wctx, point, nodes, previousBlock); {
+	switch pr, proposer, err := p.selectFromProposer(ctx, wctx, point, nodes, previousBlock); {
 	case errors.Is(err, errFailedToRequestProposalToNode),
 		errors.Is(err, context.Canceled),
 		errors.Is(err, context.DeadlineExceeded):
@@ -138,19 +138,20 @@ func (p *BaseProposalSelector) selectInternal(
 }
 
 func (p *BaseProposalSelector) selectFromProposer(
-	ctx context.Context,
+	parentCtx context.Context,
+	waitCtx context.Context,
 	point base.Point,
 	nodes []base.Node,
 	previousBlock util.Hash,
 ) (base.ProposalSignFact, base.Address, error) {
 	e := util.StringError("select proposal from proposer")
 
-	proposer, err := p.args.ProposerSelectFunc(ctx, point, nodes, previousBlock)
+	proposer, err := p.args.ProposerSelectFunc(waitCtx, point, nodes, previousBlock)
 	if err != nil {
 		return nil, nil, e.WithMessage(err, "select proposer")
 	}
 
-	pr, err := p.proposalFromNode(ctx, point, proposer, previousBlock)
+	pr, err := p.proposalFromNode(parentCtx, waitCtx, point, proposer, previousBlock)
 	if err != nil {
 		return nil, proposer.Address(), e.Wrap(err)
 	}
@@ -159,11 +160,25 @@ func (p *BaseProposalSelector) selectFromProposer(
 }
 
 func (p *BaseProposalSelector) proposalFromNode(
-	ctx context.Context,
+	parentCtx context.Context,
+	waitCtx context.Context,
 	point base.Point,
 	proposer base.Node,
 	previousBlock util.Hash,
 ) (base.ProposalSignFact, error) {
+	// A proposal already published just before the wait deadline remains usable;
+	// the consensus parent and state layer decide whether it is still current.
+	switch pr, found, err := p.args.Pool.ProposalByPoint(point, proposer.Address(), previousBlock); {
+	case err != nil:
+		return nil, err
+	case found:
+		if err := parentCtx.Err(); err != nil {
+			return nil, errors.WithStack(err)
+		}
+
+		return pr, nil
+	}
+
 	ticker := time.NewTicker(time.Millisecond * 33)
 	defer ticker.Stop()
 
@@ -171,14 +186,16 @@ func (p *BaseProposalSelector) proposalFromNode(
 
 	for {
 		select {
-		case <-ctx.Done():
-			return nil, errors.WithStack(ctx.Err())
+		case <-parentCtx.Done():
+			return nil, errors.WithStack(parentCtx.Err())
+		case <-waitCtx.Done():
+			return nil, errors.WithStack(waitCtx.Err())
 		case <-ticker.C:
 			reset.Do(func() {
 				ticker.Reset(p.args.RequestProposalInterval)
 			})
 
-			switch pr, err := p.findProposal(ctx, point, proposer, previousBlock); {
+			switch pr, err := p.findProposalWithContexts(parentCtx, waitCtx, point, proposer, previousBlock); {
 			case err == nil:
 				return pr, nil
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -199,16 +216,30 @@ func (p *BaseProposalSelector) findProposal(
 	proposer base.Node,
 	previousBlock util.Hash,
 ) (base.ProposalSignFact, error) {
+	return p.findProposalWithContexts(ctx, ctx, point, proposer, previousBlock)
+}
+
+func (p *BaseProposalSelector) findProposalWithContexts(
+	parentCtx context.Context,
+	waitCtx context.Context,
+	point base.Point,
+	proposer base.Node,
+	previousBlock util.Hash,
+) (base.ProposalSignFact, error) {
 	e := util.StringError("find proposal")
 
 	switch pr, found, err := p.args.Pool.ProposalByPoint(point, proposer.Address(), previousBlock); {
 	case err != nil:
 		return nil, e.Wrap(err)
 	case found:
+		if err := parentCtx.Err(); err != nil {
+			return nil, e.Wrap(err)
+		}
+
 		return pr, nil
 	}
 
-	pr, err := p.findProposalFromProposer(ctx, point, proposer, previousBlock)
+	pr, err := p.findProposalFromProposer(parentCtx, waitCtx, point, proposer, previousBlock)
 	if err != nil {
 		return nil, e.Wrap(err)
 	}
@@ -217,17 +248,18 @@ func (p *BaseProposalSelector) findProposal(
 }
 
 func (p *BaseProposalSelector) findProposalFromProposer(
-	ctx context.Context,
+	parentCtx context.Context,
+	waitCtx context.Context,
 	point base.Point,
 	proposer base.Node,
 	previousBlock util.Hash,
 ) (base.ProposalSignFact, error) {
 	if proposer.Address().Equal(p.local.Address()) {
-		return p.args.Maker.Make(ctx, point, previousBlock)
+		return p.args.Maker.MakeWithContexts(parentCtx, waitCtx, point, previousBlock)
 	}
 
 	// NOTE if not found in local, request to proposer node
-	rctx, cancel := context.WithTimeout(ctx, p.args.TimeoutRequest())
+	rctx, cancel := context.WithTimeout(waitCtx, p.args.TimeoutRequest())
 	defer cancel()
 
 	donech := make(chan interface{})

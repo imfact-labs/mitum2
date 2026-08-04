@@ -635,6 +635,38 @@ func (t *testBaseProposalSelector) TestParentContextCanceledIsNotProposalSelecti
 	t.NotErrorIs(err, ErrProposalSelectionFailed)
 }
 
+func (t *testBaseProposalSelector) TestExpiredWaitUsesPoolHitWhileParentAlive() {
+	nodes := t.newNodes(0, t.Local)
+	args := t.newargs(nodes)
+	point := base.RawPoint(66, 11)
+	prev := valuehash.RandomSHA512()
+	want, err := args.Maker.Make(context.Background(), point, prev)
+	t.NoError(err)
+	waitCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := NewBaseProposalSelector(t.Local, args).proposalFromNode(
+		context.Background(), waitCtx, point, t.Local, prev)
+	t.NoError(err)
+	t.True(want.Fact().Hash().Equal(got.Fact().Hash()))
+}
+
+func (t *testBaseProposalSelector) TestCanceledParentRejectsPoolHit() {
+	nodes := t.newNodes(0, t.Local)
+	args := t.newargs(nodes)
+	point := base.RawPoint(66, 11)
+	prev := valuehash.RandomSHA512()
+	_, err := args.Maker.Make(context.Background(), point, prev)
+	t.NoError(err)
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	pr, err := NewBaseProposalSelector(t.Local, args).proposalFromNode(
+		parentCtx, context.Background(), point, t.Local, prev)
+	t.Nil(pr)
+	t.ErrorIs(err, context.Canceled)
+}
+
 func (t *testBaseProposalSelector) TestLocalProposerNonContextErrorIsFatal() {
 	nodes := t.newNodes(2, t.Local)
 	args := t.newargs(nodes)

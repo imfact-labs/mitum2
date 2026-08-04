@@ -146,6 +146,10 @@ func QuicstreamHandlerRequestProposal(
 	getOrCreateProposal := func(ctx context.Context, header RequestProposalRequestHeader) (
 		base.ProposalSignFact, error,
 	) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		proposer := header.Proposer()
 
 		point := header.point
@@ -171,7 +175,7 @@ func QuicstreamHandlerRequestProposal(
 			return pr, nil
 		}
 
-		return proposalMaker.Make(ctx, point, previousBlock)
+		return proposalMaker.MakeWithContexts(ctx, ctx, point, previousBlock)
 	}
 
 	return boolEncodeQUICstreamHandler(

@@ -237,6 +237,15 @@ func (st *baseBallotHandler) makeINITBallot(
 	default:
 		pr = i
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, e.Wrap(err)
+	}
+	switch stale, err := st.isStaleProposalPoint(point); {
+	case err != nil:
+		return nil, e.Wrap(err)
+	case stale:
+		return nil, e.Wrap(isaac.ErrStaleProposalPoint.Errorf("stale proposal selected, point=%v", point))
+	}
 
 	// NOTE collect suffrage expel operations
 	expels, expelfacts, err := st.findExpels(point.Height(), suf)

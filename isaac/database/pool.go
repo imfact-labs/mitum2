@@ -268,6 +268,9 @@ func (db *TempPool) OperationHashes(
 	filter func(isaac.PoolOperationRecordMeta) (bool, error),
 ) ([][2]util.Hash, error) {
 	e := util.StringError("find new operations")
+	if err := ctx.Err(); err != nil {
+		return nil, e.Wrap(err)
+	}
 
 	pst, err := db.st()
 	if err != nil {
@@ -299,6 +302,10 @@ func (db *TempPool) OperationHashes(
 	if err := pst.Iter(
 		leveldbutil.BytesPrefix(leveldbKeyPrefixNewOperationOrdered[:]),
 		func(k []byte, b []byte) (bool, error) {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+
 			meta, err := ReadFrameHeaderOperation(b)
 			if err != nil {
 				removeOrdered = append(removeOrdered, k)
@@ -315,6 +322,9 @@ func (db *TempPool) OperationHashes(
 				removeOps = append(removeOps, meta.Operation())
 
 				return true, nil
+			}
+			if err := ctx.Err(); err != nil {
+				return false, err
 			}
 
 			if _, found := facts[meta.Fact().String()]; found {
@@ -338,12 +348,20 @@ func (db *TempPool) OperationHashes(
 	); err != nil {
 		return nil, e.Wrap(err)
 	}
-
+	if err := ctx.Err(); err != nil {
+		return nil, e.Wrap(err)
+	}
 	if err := db.removeNewOperationOrdereds(removeOrdered); err != nil {
 		return nil, e.Wrap(err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, e.Wrap(err)
+	}
 	if err := db.setRemoveNewOperations(ctx, height, removeOps); err != nil {
+		return nil, e.Wrap(err)
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, e.Wrap(err)
 	}
 

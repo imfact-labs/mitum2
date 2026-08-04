@@ -715,6 +715,48 @@ func (t *testQuicstreamHandlers) TestRequestProposal() {
 		t.Nil(pr)
 	})
 
+	t.Run("rpc cancellation stops local maker without proposal", func() {
+		npool := t.NewPool()
+		defer npool.DeepClose()
+		started := make(chan struct{})
+		stopped := make(chan struct{})
+		maker := isaac.NewProposalMaker(
+			t.Local,
+			t.LocalParams.NetworkID(),
+			func(ctx context.Context, _ base.Height) ([][2]util.Hash, error) {
+				close(started)
+				<-ctx.Done()
+				close(stopped)
+
+				return nil, ctx.Err()
+			},
+			npool,
+			nil,
+		).SetOperationTimeoutFunc(func() time.Duration { return time.Second })
+		handler := QuicstreamHandlerRequestProposal(t.Local.Address(), npool, maker,
+			func(context.Context, RequestProposalRequestHeader) (base.ProposalSignFact, error) { return nil, nil },
+		)
+		_, dialf := TestingDialFunc(t.Encs, HandlerNameRequestProposal, handler)
+		client := NewBaseClient(t.Encs, t.Enc, dialf, func() error { return nil })
+		point := base.RawPoint(34, 1)
+		prev := valuehash.RandomSHA256()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := client.RequestProposal(ctx, ci, point, t.Local.Address(), prev)
+			done <- err
+		}()
+		<-started
+		cancel()
+		<-stopped
+
+		err := <-done
+		t.ErrorIs(err, context.Canceled)
+		_, found, err := npool.ProposalByPoint(point, t.Local.Address(), prev)
+		t.NoError(err)
+		t.False(found)
+	})
+
 	t.Run("handover x; ok", func() {
 		prev := valuehash.RandomSHA256()
 		point := base.RawPoint(33, 1)

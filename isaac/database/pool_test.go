@@ -595,6 +595,47 @@ func (t *testNewOperationPool) TestNewOperationHashes() {
 	})
 }
 
+func (t *testNewOperationPool) TestOperationHashesContextCancellation() {
+	pst := t.NewPool()
+	defer pst.Close()
+
+	for i := 0; i < 3; i++ {
+		fact := isaac.NewDummyOperationFact(util.UUID().Bytes(), valuehash.RandomSHA256())
+		op, _ := isaac.NewDummyOperation(fact, t.local.Privatekey(), t.networkID)
+		added, err := pst.SetOperation(context.Background(), op)
+		t.NoError(err)
+		t.True(added)
+	}
+
+	t.Run("pre-cancelled does not iterate", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		var called int
+		_, err := pst.OperationHashes(ctx, base.Height(33), 3, func(isaac.PoolOperationRecordMeta) (bool, error) {
+			called++
+
+			return true, nil
+		})
+		t.ErrorIs(err, context.Canceled)
+		t.Zero(called)
+	})
+
+	t.Run("cancel during iteration stops next operation", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		var called int
+
+		_, err := pst.OperationHashes(ctx, base.Height(33), 3, func(isaac.PoolOperationRecordMeta) (bool, error) {
+			called++
+			cancel()
+
+			return true, nil
+		})
+		t.ErrorIs(err, context.Canceled)
+		t.Equal(1, called)
+	})
+}
+
 func (t *testNewOperationPool) TestTraverseOperationsBytes() {
 	pst := t.NewPool()
 	defer pst.Close()
